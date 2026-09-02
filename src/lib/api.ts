@@ -1,5 +1,6 @@
 import type { ApiKeys, BookInput, EngineKind, StoryJSON, StoryProvider } from "../types";
 import { generateStory as demoGenerateStory, validateStory } from "./storyEngine";
+import { delay } from "./utils";
 
 /* ── Провайдер внешних API ─────────────────────────────────────────────────
    В продакшене вызовы идут через локальные эндпоинты /api/generate-story,
@@ -158,6 +159,7 @@ export const isQuotaError = (e: string | null | undefined): boolean => !!e && QU
 let quotaBreaker = false;
 export function resetQuotaBreaker(): void {
   quotaBreaker = false;
+  hfProviderAuthDead = false;
 }
 
 async function callGeminiImage(model: string, prompt: string, referencePhotos: string[], key: string): Promise<string> {
@@ -271,7 +273,7 @@ async function callHuggingFaceImage(model: string, prompt: string, key: string):
         "\n→ Модель с ограниченным доступом: откройте её карточку на huggingface.co и нажмите «Agree and access», затем повторите.";
     else if (HF_AUTH_FAIL_RE.test(msg))
       msg +=
-        "\n→ Токен не принят роутером. Нужен токен HF с правом «Inference Providers» (fine-grained: inference.serverless.write) — huggingface.co/settings/tokens.";
+        "\n→ Токен без права «Inference Providers» (fine-grained: inference.serverless.write). Приложение автоматически попробует классический маршрут hf-inference — он работает с обычным токеном.";
     throw new Error(msg);
   }
   const j = JSON.parse(body) as {
@@ -287,19 +289,88 @@ async function callHuggingFaceImage(model: string, prompt: string, key: string):
   return blobToDataUrl(await img.blob());
 }
 
+/* ── этап B: классический маршрут Inference (provider hf-inference) ────────
+   POST router.huggingface.co/hf-inference/models/{model}, {"inputs": …} →
+   сырые байты картинки. Работает с ОБЫЧНЫМ HF-токеном (хватает даже
+   read-only) — право «Inference Providers» не требуется, в отличие от
+   маршрута fal-ai. Модели проверены по живому списку тёплых серверлесс-
+   моделей HF (inference=warm, text-to-image), обе не gated. */
+const HF_CLASSIC_MODELS = ["black-forest-labs/FLUX.1-schnell", "stabilityai/stable-diffusion-3.5-large"] as const;
+
+async function callHfClassicImage(model: string, prompt: string, key: string, retried = false): Promise<string> {
+  const res = await fetch(`https://router.huggingface.co/hf-inference/models/${model}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
+    body: JSON.stringify({
+      inputs: prompt,
+      parameters: { width: 1024, height: 1024, num_inference_steps: 4 }, // schnell рассчитана на 1–4 шага
+    }),
+  });
+  const blob = await res.blob();
+  if (!res.ok) {
+    let msg = extractError(res.status, `hf-inference/${model}`, await blob.text());
+    if (/loading|currently loading/i.test(msg) && !retried) {
+      // холодный старт модели — даём ей проснуться и пробуем ещё раз
+      await delay(8000);
+      return callHfClassicImage(model, prompt, key, true);
+    }
+    throw new Error(msg);
+  }
+  if (blob.type.startsWith("image/") || blob.size > 20_000) return blobToDataUrl(blob);
+  // на всякий случай — JSON-вариант ответа (url/base64)
+  const body = await blob.text();
+  try {
+    const j = JSON.parse(body) as { url?: string; b64_json?: string; image?: string };
+    if (j?.b64_json) return `data:image/jpeg;base64,${j.b64_json}`;
+    if (j?.image) return `data:image/jpeg;base64,${j.image}`;
+    if (j?.url) {
+      const img = await fetch(j.url);
+      if (img.ok) return blobToDataUrl(await img.blob());
+    }
+  } catch {
+    /* не JSON — считаем сырыми байтами картинки */
+  }
+  return blobToDataUrl(blob);
+}
+
+/** 401 от fal-ai = токен без права Inference Providers; за прогон не «выздоровеет» */
+let hfProviderAuthDead = false;
+
 export async function generateImageViaHuggingFace(prompt: string, keys: ApiKeys | null): Promise<ImageCallResult> {
   if (!keys?.huggingface) return { dataUrl: null, error: "HUGGINGFACE_API_KEY не задан", via: "huggingface" };
-  let lastError = "неизвестная ошибка";
-  for (const model of HF_MODELS) {
+  const stageErrors: string[] = [];
+
+  /* этап A: fal-ai через OpenAI-маршрут (Krea-2-Turbo → FLUX.1-schnell) */
+  if (!hfProviderAuthDead) {
+    for (const model of HF_MODELS) {
+      try {
+        return { dataUrl: await callHuggingFaceImage(model, prompt, keys.huggingface), error: null, via: "huggingface" };
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        stageErrors.push(msg);
+        if (HF_AUTH_FAIL_RE.test(msg) && !HF_NEXT_MODEL_RE.test(msg)) {
+          hfProviderAuthDead = true; // не долбить fal на каждой странице
+          break;
+        }
+        if (!HF_NEXT_MODEL_RE.test(msg)) break;
+      }
+    }
+  } else {
+    stageErrors.push("fal-ai пропущен: токен без права «Inference Providers» (HTTP 401)");
+  }
+
+  /* этап B: классический hf-inference — обычный токен проходит */
+  for (const model of HF_CLASSIC_MODELS) {
     try {
-      return { dataUrl: await callHuggingFaceImage(model, prompt, keys.huggingface), error: null, via: "huggingface" };
+      const dataUrl = await callHfClassicImage(model, prompt, keys.huggingface);
+      if (stageErrors.length)
+        console.info(`[illustration] HF: fal-ai не сработал — классический маршрут hf-inference/${model} спас`);
+      return { dataUrl, error: null, via: "huggingface" };
     } catch (e) {
-      lastError = e instanceof Error ? e.message : String(e);
-      // плохой токен одинаков для всех моделей — не тратить остальные попытки
-      if (HF_AUTH_FAIL_RE.test(lastError) && !HF_NEXT_MODEL_RE.test(lastError)) break;
-      if (!HF_NEXT_MODEL_RE.test(lastError)) break; // сетевые/прочие сбои тоже не лечатся сменой модели
+      stageErrors.push(`hf-inference/${model}: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
+  const lastError = stageErrors.join("\n");
   console.warn(`[illustration] Hugging Face: ${lastError}`);
   return { dataUrl: null, error: lastError, via: "huggingface" };
 }
