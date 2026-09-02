@@ -137,8 +137,9 @@ export interface ImageCallResult {
 const extractError = (status: number, context: string, body: string): string => {
   let msg = body;
   try {
-    const j = JSON.parse(body) as { error?: { message?: string }; message?: string };
-    msg = j?.error?.message ?? j?.message ?? body;
+    const j = JSON.parse(body) as { error?: { message?: string } | string; message?: string };
+    // Gemini: {error:{message}}, роутер HF: {error:"строка"} — обе формы
+    msg = (typeof j?.error === "string" ? j.error : j?.error?.message) ?? j?.message ?? body;
   } catch {
     /* тело не JSON — показываем как есть */
   }
@@ -235,13 +236,18 @@ export async function generateImageViaApi(
 
 /* ── Hugging Face (Inference Providers, provider=fal-ai) ──────────────────
    Запасной провайдер иллюстраций: krea/Krea-2-Turbo, фолбэк на
-   FLUX.1-schnell. Тот же промпт/стиль, что идёт в Gemini. */
-const HF_ROUTES = [
-  { path: "fal-ai/v1/krea/krea-2-turbo", size: { aspect_ratio: "1:1" }, name: "krea/Krea-2-Turbo" },
-  { path: "fal-ai/v1/black-forest-labs/flux-schnell", size: { image_size: "square_hd" }, name: "FLUX.1-schnell" },
-] as const;
+   black-forest-labs/FLUX.1-schnell. Тот же промпт/стиль, что идёт в Gemini.
 
-const HF_ROUTE_FALLBACK_RE = /HTTP 404|not found|Unsupported|not supported|does not exist/i;
+   ВАЖНО: используется OpenAI-совместимый маршрут роутера
+   /fal-ai/v1/images/generations с моделью в теле запроса и HF-токеном в
+   Authorization. Нативные маршруты fal (/fal-ai/v1/{model}) требуют ключ fal
+   и отвечают «Invalid username or password» на HF-токен. */
+const HF_ENDPOINT = "https://router.huggingface.co/fal-ai/v1/images/generations";
+const HF_MODELS = ["krea/Krea-2-Turbo", "black-forest-labs/FLUX.1-schnell"] as const;
+
+/** «эта модель недоступна — попробуй следующую» vs «токен плохой — дальше нет смысла» */
+const HF_NEXT_MODEL_RE = /not supported|not found|does not exist|gated|access to this model|license|agree/i;
+const HF_AUTH_FAIL_RE = /invalid username|invalid api key|invalid token|unauthorized/i;
 
 const blobToDataUrl = (blob: Blob): Promise<string> =>
   new Promise((resolve, reject) => {
@@ -251,18 +257,31 @@ const blobToDataUrl = (blob: Blob): Promise<string> =>
     fr.readAsDataURL(blob);
   });
 
-async function callHuggingFaceImage(routeIdx: number, prompt: string, key: string): Promise<string> {
-  const route = HF_ROUTES[routeIdx];
-  const res = await fetch(`https://router.huggingface.co/${route.path}`, {
+async function callHuggingFaceImage(model: string, prompt: string, key: string): Promise<string> {
+  const res = await fetch(HF_ENDPOINT, {
     method: "POST",
     headers: { "content-type": "application/json", authorization: `Bearer ${key}` },
-    body: JSON.stringify({ prompt, num_images: 1, seed: Math.floor(Math.random() * 1e9), ...route.size }),
+    body: JSON.stringify({ model, prompt, size: "1024x1024", n: 1 }),
   });
   const body = await res.text();
-  if (!res.ok) throw new Error(extractError(res.status, route.name, body));
-  const j = JSON.parse(body) as { images?: Array<{ url?: string }> };
-  const url = j?.images?.[0]?.url;
-  if (!url) throw new Error(`Hugging Face вернул ответ без картинки: ${body.slice(0, 300)}`);
+  if (!res.ok) {
+    let msg = extractError(res.status, model, body);
+    if (/gated|access to this model|license|agree/i.test(msg))
+      msg +=
+        "\n→ Модель с ограниченным доступом: откройте её карточку на huggingface.co и нажмите «Agree and access», затем повторите.";
+    else if (HF_AUTH_FAIL_RE.test(msg))
+      msg +=
+        "\n→ Токен не принят роутером. Нужен токен HF с правом «Inference Providers» (fine-grained: inference.serverless.write) — huggingface.co/settings/tokens.";
+    throw new Error(msg);
+  }
+  const j = JSON.parse(body) as {
+    data?: Array<{ url?: string; b64_json?: string }>;
+    images?: Array<{ url?: string; b64_json?: string }>;
+  };
+  const item: { url?: string; b64_json?: string } | undefined = j?.data?.[0] ?? j?.images?.[0];
+  if (item?.b64_json) return `data:image/jpeg;base64,${item.b64_json}`;
+  const url = item?.url;
+  if (!url) throw new Error(`Hugging Face (${model}) вернул ответ без картинки: ${body.slice(0, 300)}`);
   const img = await fetch(url);
   if (!img.ok) throw new Error(`картинка сгенерирована, но недоступна по URL (HTTP ${img.status})`);
   return blobToDataUrl(await img.blob());
@@ -271,12 +290,14 @@ async function callHuggingFaceImage(routeIdx: number, prompt: string, key: strin
 export async function generateImageViaHuggingFace(prompt: string, keys: ApiKeys | null): Promise<ImageCallResult> {
   if (!keys?.huggingface) return { dataUrl: null, error: "HUGGINGFACE_API_KEY не задан", via: "huggingface" };
   let lastError = "неизвестная ошибка";
-  for (let i = 0; i < HF_ROUTES.length; i++) {
+  for (const model of HF_MODELS) {
     try {
-      return { dataUrl: await callHuggingFaceImage(i, prompt, keys.huggingface), error: null, via: "huggingface" };
+      return { dataUrl: await callHuggingFaceImage(model, prompt, keys.huggingface), error: null, via: "huggingface" };
     } catch (e) {
       lastError = e instanceof Error ? e.message : String(e);
-      if (!HF_ROUTE_FALLBACK_RE.test(lastError)) break;
+      // плохой токен одинаков для всех моделей — не тратить остальные попытки
+      if (HF_AUTH_FAIL_RE.test(lastError) && !HF_NEXT_MODEL_RE.test(lastError)) break;
+      if (!HF_NEXT_MODEL_RE.test(lastError)) break; // сетевые/прочие сбои тоже не лечатся сменой модели
     }
   }
   console.warn(`[illustration] Hugging Face: ${lastError}`);
