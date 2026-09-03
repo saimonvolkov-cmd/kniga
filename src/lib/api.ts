@@ -103,11 +103,11 @@ export async function generateStoryViaApi(
 ): Promise<StoryResult> {
   const backendOn = await isBackendAvailable();
 
-  // Приоритет истории: бэкенд (YandexGPT через /api) → YandexGPT из браузера
-  // (yandex.env.json + relay) → легаси-ключи (Claude, Gemini) → демо-движок
+  // Приоритет истории: прокси /api/yandex/generate-text (YandexGPT, ключ на сервере)
+  // → легаси-ключи (Claude, Gemini) → демо-движок
   if (backendOn) {
     try {
-      console.info("[narrative] история через бэкенд /api/generate-text (YandexGPT, ключ на сервере)");
+      console.info("[narrative] история через прокси /api/yandex/generate-text (YandexGPT, ключ на сервере)");
       const raw = await backendGenerateText(buildStoryPrompt(input, seed), STORY_SYSTEM);
       const story = JSON.parse(raw.replace(/```json|```/g, "").trim()) as StoryJSON;
       if (validateStory(story, input.spread_count)) return { story, engine: "yandex-gpt" };
@@ -117,17 +117,7 @@ export async function generateStoryViaApi(
     }
   }
 
-  // YandexGPT из браузера: ключ из yandex.env.json (окно ввода убрано)
-  const creds = await resolveYandexCreds();
-  if (creds) {
-    try {
-      return { story: await storyFromYandexGpt(creds, input, seed), engine: "yandex-gpt" };
-    } catch (e) {
-      console.warn("[narrative] YandexGPT недоступен:", e);
-      if (keys?.gemini) console.info("[narrative] авто-фолбэк: история через Gemini");
-    }
-  }
-  // легаси-ключи из localStorage (окно ввода больше не показывается)
+  // Легаси-ключи из localStorage (окно ввода убрано, но сохранённые ключи ещё работают)
   if (keys?.anthropic) {
     try {
       return { story: await storyFromClaude(keys.anthropic, input, seed), engine: "gemini+claude" };
@@ -427,250 +417,95 @@ export async function generateImageViaPollinations(prompt: string): Promise<Imag
   }
 }
 
-/* ── Локальный бэкенд-прокси (server/index.js → /api/*) ──────────────────
-   Когда приложение открыто через сервер, Yandex-запросы идут через него:
-   ключ живёт в серверном .env и вообще не попадает в браузер. Обнаружение —
-   GET /api/health; при статической раздаче (без сервера) проба падает, и
-   пайплайн честно катится по прямой браузерной цепочке провайдеров. */
-let backendState: boolean | null = null;
+/* ── Локальный Yandex-прокси (server/server.js → /api/yandex/*) ──────────
+   Yandex AI Studio не отдаёт CORS-заголовки, поэтому вызвать его из браузера
+   нельзя в принципе — нужен посредник. Им служит локальный Express-сервер:
+   он держит YANDEX_API_KEY / YANDEX_FOLDER_ID в своём .env и отдаёт
+   POST /api/yandex/generate-text и /api/yandex/generate-image. Фронтенд ищет
+   прокси на localhost:3001 (или на своём origin для развёртывания за одним
+   портом). Если прокси не запущен или ключ не задан — Yandex-провайдер
+   «не настроен», и пайплайн катится по остальным провайдерам, которые
+   работают из браузера напрямую, как и раньше: Gemini → Hugging Face →
+   Pollinations → демо. Правило «только через сервер» касается лишь Yandex. */
 
-export async function isBackendAvailable(force = false): Promise<boolean> {
-  if (backendState !== null && !force) return backendState;
+export type ConnMode = "backend" | "off";
+
+const BACKEND_BASES = ["http://localhost:3001", ""];
+let backendBasePromise: Promise<string | null> | null = null;
+
+async function probeYandexStatus(base: string): Promise<boolean> {
   try {
-    const res = await fetch("/api/health", {
+    const res = await fetch(`${base}/api/yandex/status`, {
       headers: { accept: "application/json" },
       signal: AbortSignal.timeout(1500),
     });
-    const ct = res.headers.get("content-type") ?? "";
-    backendState = res.ok && ct.includes("application/json") && ((await res.json()) as { ok?: boolean }).ok === true;
+    if (!res.ok) return false;
+    const j = (await res.json()) as { ok?: boolean; configured?: boolean };
+    return j.ok === true && j.configured === true;
   } catch {
-    backendState = false;
+    return false;
   }
-  return backendState;
 }
 
-async function backendPost(url: string, payload: unknown, timeoutMs: number): Promise<string> {
-  const res = await fetch(url, {
+/** Адрес работающего прокси (или null). Кэшируется на время жизни страницы. */
+export function getBackendBase(force = false): Promise<string | null> {
+  if (backendBasePromise && !force) return backendBasePromise;
+  backendBasePromise = (async () => {
+    for (const base of BACKEND_BASES) if (await probeYandexStatus(base)) return base;
+    return null;
+  })();
+  return backendBasePromise;
+}
+
+export async function isBackendAvailable(force = false): Promise<boolean> {
+  return (await getBackendBase(force)) !== null;
+}
+
+/** Лёгкий статус для индикатора в шапке: настроен ли Yandex на сервере */
+export async function detectConnection(): Promise<ConnMode> {
+  return (await isBackendAvailable()) ? "backend" : "off";
+}
+
+async function backendPost(path: string, payload: unknown, timeoutMs: number): Promise<string> {
+  const base = await getBackendBase();
+  if (base === null)
+    throw new Error("Yandex не настроен: запустите прокси (npm --prefix server run server) и проверьте .env");
+  const res = await fetch(`${base}${path}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(timeoutMs),
   });
   const body = await res.text();
-  if (!res.ok) throw new Error(extractError(res.status, `бэкенд ${url}`, body));
+  if (!res.ok) throw new Error(extractError(res.status, `бэкенд ${path}`, body));
   return body;
 }
 
-/** Narrative через бэкенд: POST /api/generate-text → raw-текст (Story JSON парсит фронтенд) */
-export async function backendGenerateText(prompt: string, system: string, maxTokens = 12000): Promise<string> {
-  const body = await backendPost("/api/generate-text", { prompt, system, temperature: 0.85, maxTokens }, 120_000);
+/** Narrative через прокси: POST /api/yandex/generate-text → raw-текст (Story JSON парсит фронтенд) */
+export async function backendGenerateText(prompt: string, system: string, maxTokens = 8000): Promise<string> {
+  const body = await backendPost("/api/yandex/generate-text", { prompt, system, temperature: 0.85, maxTokens }, 180_000);
   const text = (JSON.parse(body) as { text?: string }).text;
-  if (!text) throw new Error("бэкенд /api/generate-text вернул пустой текст");
+  if (!text) throw new Error("бэкенд /api/yandex/generate-text вернул пустой текст");
   return text;
 }
 
-/** Illustration через бэкенд: POST /api/generate-image → dataURL картинки */
+/** Illustration через прокси: POST /api/yandex/generate-image → dataURL картинки */
 export async function backendGenerateImage(prompt: string, seed?: number): Promise<string> {
-  const body = await backendPost("/api/generate-image", { prompt, seed }, 240_000);
+  const body = await backendPost("/api/yandex/generate-image", { prompt, seed }, 240_000);
   const dataUrl = (JSON.parse(body) as { dataUrl?: string }).dataUrl;
-  if (!dataUrl) throw new Error("бэкенд /api/generate-image вернул ответ без dataUrl");
+  if (!dataUrl) throw new Error("бэкенд /api/yandex/generate-image вернул ответ без dataUrl");
   return ensureDataPrefix(dataUrl);
 }
 
-/* ── Yandex Cloud AI Studio (YandexGPT + YandexART) ──────────────────────
-   Авторизация: `Authorization: Api-Key <YANDEX_API_KEY>` + `x-folder-id`.
-   YandexGPT — текст (completionAsync + поллинг операции).
-   YandexART — картинки (textToImageAsync + поллинг операции → imageBase64).
-   Оба — асинхронные: запрос → operation id → GET /operations/{id} до done.
 
-   Ключи — БЕЗ окна ввода, разрешаются автоматически:
-     1) запущен серверный прокси (server/index.js) → запросы идут через /api,
-        ключ живёт в серверном .env и в браузер не попадает вообще;
-     2) иначе — public/yandex.env.json, раздаётся вместе с приложением
-        (временный тестовый ключ — заменить после проверки!);
-     3) иначе — легаси-ключи из localStorage (если остались).
-   Yandex API не поддерживает CORS, поэтому в браузерном режиме (без сервера)
-   после неудачного прямого запроса автоматически повторяем через публичный
-   relay corsproxy.io — только для локального теста на сменном ключе. */
-const YANDEX_BASE = "https://ai.api.cloud.yandex.net";
-const YANDEX_TEXT_MODEL = "yandexgpt";
-const YANDEX_ART_MODEL = "yandex-art";
-const YANDEX_ART_ENDPOINTS = ["textToImageAsync", "imageGenerationAsync"] as const;
-const CORS_RELAY = (u: string) => `https://corsproxy.io/?url=${encodeURIComponent(u)}`;
 
-export type YandexCreds = { apiKey: string; folderId: string };
-export type ConnMode = "backend" | "env" | "off";
 
-function yandexHeaders(creds: YandexCreds): Record<string, string> {
-  return {
-    "content-type": "application/json",
-    authorization: `Api-Key ${creds.apiKey}`,
-    "x-folder-id": creds.folderId,
-  };
-}
-
-let credsPromise: Promise<YandexCreds | null> | null = null;
-
-/** Ключ + каталог без окна ввода: yandex.env.json → localStorage (легаси). */
-export function resolveYandexCreds(): Promise<YandexCreds | null> {
-  credsPromise ??= (async () => {
-    try {
-      const res = await fetch("yandex.env.json", { cache: "no-store", signal: AbortSignal.timeout(2500) });
-      if (res.ok) {
-        const j = (await res.json()) as { apiKey?: string; folderId?: string };
-        if (j?.apiKey && j?.folderId) {
-          console.info("[yandex] ключи взяты из yandex.env.json — не забудьте заменить тестовый ключ");
-          return { apiKey: String(j.apiKey).trim(), folderId: String(j.folderId).trim() };
-        }
-      }
-    } catch {
-      /* файла нет — нормально */
-    }
-    try {
-      const k = loadKeys();
-      if (k.yandexApiKey?.trim() && k.yandexFolderId?.trim())
-        return { apiKey: k.yandexApiKey.trim(), folderId: k.yandexFolderId.trim() };
-    } catch {
-      /* noop */
-    }
-    return null;
-  })();
-  return credsPromise;
-}
-
-/** Какой канал Yandex сейчас активен — для живого индикатора в шапке */
-export async function detectConnection(): Promise<ConnMode> {
-  if (await isBackendAvailable()) return "backend";
-  return (await resolveYandexCreds()) ? "env" : "off";
-}
-
-type YandexResp = { ok: boolean; status: number; body: string; via: string };
-
-/** Запрос к Yandex: сначала напрямую; при сетевом/CORS-сбое — через relay. */
-async function yandexFetch(path: string, init: RequestInit, creds: YandexCreds, timeoutMs = 25_000): Promise<YandexResp> {
-  const url = YANDEX_BASE + path;
-  const attempts = [
-    { name: "напрямую", u: url },
-    { name: "relay corsproxy.io", u: CORS_RELAY(url) },
-  ];
-  let netErr = "";
-  for (const a of attempts) {
-    try {
-      const res = await fetch(a.u, {
-        ...init,
-        headers: { ...yandexHeaders(creds), ...(init.headers ?? {}) },
-        signal: AbortSignal.timeout(timeoutMs),
-      });
-      const body = await res.text();
-      if (a.name !== "напрямую") console.info(`[yandex] ${path} → ${a.name} (HTTP ${res.status})`);
-      return { ok: res.ok, status: res.status, body, via: a.name };
-    } catch (e) {
-      netErr = e instanceof Error ? e.message : String(e);
-      console.warn(`[yandex] ${path} (${a.name}): ${netErr}`);
-    }
-  }
-  throw new Error(
-    `Yandex API недоступен из браузера (${netErr}). Запустите прокси: «node server/index.js» — и запросы пойдут через /api без CORS.`
-  );
-}
-
-/** Поллинг операции Foundation Models до завершения (или ошибки) */
-async function yandexPollOperation(opId: string, creds: YandexCreds, what: string): Promise<Record<string, unknown>> {
-  for (let i = 0; i < 45; i++) { // ~90 с максимум
-    await delay(2000);
-    const r = await yandexFetch(`/operations/${opId}`, { method: "GET" }, creds);
-    if (!r.ok) throw new Error(extractError(r.status, `Yandex operation ${what}`, r.body));
-    const op = JSON.parse(r.body) as {
-      done?: boolean;
-      error?: { message?: string; code?: number };
-      response?: Record<string, unknown>;
-    };
-    if (op.error)
-      throw new Error(`Yandex ${what}: операция завершилась с ошибкой: ${op.error.message ?? r.body.slice(0, 300)}`);
-    if (op.done && op.response) return op.response;
-  }
-  throw new Error(`Yandex ${what}: операция ${opId} не завершилась за отведённое время`);
-}
-
-/** Narrative Module: YandexGPT (completionAsync + поллинг) → Story JSON */
-async function storyFromYandexGpt(creds: YandexCreds, input: BookInput, seed: number): Promise<StoryJSON> {
-  const startRes = await yandexFetch(
-    "/foundationModels/v1/completionAsync",
-    {
-      method: "POST",
-      body: JSON.stringify({
-        modelUri: `gpt://${creds.folderId}/${YANDEX_TEXT_MODEL}`,
-        completionOptions: { stream: false, temperature: 0.8, maxTokens: "8000" },
-        messages: [
-          { role: "system", text: STORY_SYSTEM },
-          { role: "user", text: buildStoryPrompt(input, seed) },
-        ],
-      }),
-    },
-    creds
-  );
-  if (!startRes.ok) throw new Error(extractError(startRes.status, "YandexGPT", startRes.body));
-  const start = JSON.parse(startRes.body) as { id?: string };
-  if (!start.id) throw new Error(`YandexGPT не вернул id операции: ${startRes.body.slice(0, 300)}`);
-  const response = (await yandexPollOperation(start.id, creds, "YandexGPT")) as {
-    alternatives?: Array<{ message?: { text?: string } }>;
-  };
-  const raw = response?.alternatives?.[0]?.message?.text ?? "";
-  if (!raw) throw new Error("YandexGPT вернул пустой текст");
-  const story = JSON.parse(raw.replace(/```json|```/g, "").trim()) as StoryJSON;
-  if (!validateStory(story, input.spread_count)) throw new Error("invalid story json from yandex-gpt");
-  return story;
-}
-
-/** Illustration Module: YandexART (textToImageAsync + поллинг → imageBase64) */
-export async function generateImageViaYandexArt(prompt: string): Promise<ImageCallResult> {
-  const creds = await resolveYandexCreds();
-  if (!creds)
-    return {
-      dataUrl: null,
-      error: "YandexART: нет ключей — не запущен бэкенд (node server/index.js) и нет public/yandex.env.json",
-      via: "yandex-art",
-    };
-  let lastError = "неизвестная ошибка";
-  for (const endpoint of YANDEX_ART_ENDPOINTS) {
-    try {
-      const startRes = await yandexFetch(
-        `/foundationModels/v1/${endpoint}`,
-        {
-          method: "POST",
-          body: JSON.stringify({
-            modelUri: `art://${creds.folderId}/${YANDEX_ART_MODEL}/latest`,
-            prompt,
-            mimeType: "JPEG",
-            ratio: "1:1",
-          }),
-        },
-        creds
-      );
-      if (!startRes.ok) throw new Error(extractError(startRes.status, `YandexART ${endpoint}`, startRes.body));
-      const start = JSON.parse(startRes.body) as { id?: string };
-      if (!start.id) throw new Error(`YandexART не вернул id операции: ${startRes.body.slice(0, 300)}`);
-      const response = (await yandexPollOperation(start.id, creds, "YandexART")) as {
-        imageBase64?: string;
-        image?: string;
-      };
-      const b64 = response?.imageBase64 ?? response?.image;
-      if (!b64) throw new Error("YandexART вернул операцию без imageBase64");
-      console.info(`[illustration] YandexART: картинка готова (${startRes.via})`);
-      return { dataUrl: ensureDataPrefix(`image/jpeg;base64,${b64}`), error: null, via: "yandex-art" };
-    } catch (e) {
-      lastError = e instanceof Error ? e.message : String(e);
-      if (!/HTTP 404|not found/i.test(lastError)) break; // не тот эндпоинт — пробуем следующий
-    }
-  }
-  console.warn(`[illustration] YandexART: ${lastError}`);
-  return { dataUrl: null, error: lastError, via: "yandex-art" };
-}
-
-/** Illustration Module: выбор провайдера. Порядок: бэкенд /api/generate-image
-    (YandexART, ключ на сервере) → Gemini → YandexART напрямую (только без сервера)
-    → Hugging Face (fal-ai / классический) → Pollinations (без ключа).
-    Все упали → null, пайплайн рисует демо-движком. */
+/** Illustration Module: выбор провайдера. Порядок: прокси /api/yandex/generate-image
+    (YandexART, ключ на сервере) → Gemini → Hugging Face (fal-ai / классический)
+    → Pollinations (без ключа).
+    Все упали → null, пайплайн рисует демо-движком.
+    YandexART ходит ТОЛЬКО через локальный прокси /api/yandex/generate-image
+    (Yandex не отдаёт CORS) — остальные провайдеры работают из браузера напрямую. */
 export async function generateIllustration(
   prompt: string,
   referencePhotos: string[],
@@ -681,17 +516,12 @@ export async function generateIllustration(
 
   if (backendOn) {
     try {
-      console.info("[illustration] картинка через бэкенд /api/generate-image (YandexART, ключ на сервере)");
+      console.info("[illustration] картинка через прокси /api/yandex/generate-image (YandexART, ключ на сервере)");
       return { dataUrl: await backendGenerateImage(prompt), error: null, via: "yandex-art" };
     } catch (e) {
-      errors.push(`Бэкенд /api/generate-image: ${e instanceof Error ? e.message : String(e)}`);
+      errors.push(`Прокси /api/yandex/generate-image: ${e instanceof Error ? e.message : String(e)}`);
     }
   }
-
-  // YandexART из браузера (yandex.env.json + relay) — приоритет после бэкенда
-  const yart = await generateImageViaYandexArt(prompt);
-  if (yart.dataUrl) return { ...yart, via: "yandex-art" };
-  errors.push(`YandexART: ${yart.error}`);
 
   const gemini = await generateImageViaApi(prompt, referencePhotos, keys);
   if (gemini.dataUrl) return { ...gemini, dataUrl: ensureDataPrefix(gemini.dataUrl) };
@@ -766,55 +596,35 @@ export async function testPollinationsImage(prompt: string): Promise<GeminiTestR
   }
 }
 
-/** Тест YandexGPT: бэкенд → иначе yandex.env.json + relay; возвращает начало ответа */
+/** Тест YandexGPT через локальный прокси (POST /api/yandex/generate-text) */
 export async function testYandexGpt(
   prompt: string
 ): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   try {
-    if (await isBackendAvailable()) {
-      const text = await backendGenerateText(`${prompt.trim()} Ответь двумя-тремя предложениями.`, "", 300);
-      return { ok: true, text: text.trim().slice(0, 600) };
-    }
-    const creds = await resolveYandexCreds();
-    if (!creds)
+    if (!(await isBackendAvailable()))
       return {
         ok: false,
         error:
-          "YandexGPT: нет ни бэкенда (node server/index.js), ни public/yandex.env.json — не с чем авторизоваться.",
+          "Yandex не настроен: запустите прокси — npm --prefix server run server (ключи читаются из .env на сервере).",
       };
-    const r = await yandexFetch(
-      "/foundationModels/v1/completion",
-      {
-        method: "POST",
-        body: JSON.stringify({
-          modelUri: `gpt://${creds.folderId}/yandexgpt-lite`,
-          completionOptions: { stream: false, temperature: 0.8, maxTokens: "300" },
-          messages: [{ role: "user", text: `${prompt.trim()} Ответь двумя-тремя предложениями.` }],
-        }),
-      },
-      creds
-    );
-    if (!r.ok) return { ok: false, error: extractError(r.status, "YandexGPT", r.body) };
-    const j = JSON.parse(r.body) as { result?: { alternatives?: Array<{ message?: { text?: string } }> } };
-    const text = j?.result?.alternatives?.[0]?.message?.text ?? "";
-    if (!text) return { ok: false, error: `YandexGPT вернул пустой ответ: ${r.body.slice(0, 200)}` };
-    return { ok: true, text };
+    const text = await backendGenerateText(`${prompt.trim()} Ответь двумя-тремя предложениями.`, "", 300);
+    return { ok: true, text: text.trim().slice(0, 600) };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? `${e.name}: ${e.message}` : String(e) };
   }
 }
 
-/** Тест YandexART: бэкенд → иначе yandex.env.json + relay; реальная картинка */
+/** Тест YandexART через локальный прокси (POST /api/yandex/generate-image) */
 export async function testYandexArt(prompt: string): Promise<GeminiTestResult> {
   try {
-    if (await isBackendAvailable()) {
-      const dataUrl = await backendGenerateImage(`${prompt.trim()}${TEST_STYLE_SUFFIX}`);
-      return { ok: true, dataUrl, bytesKb: dataUrlKb(dataUrl) };
-    }
-    const r = await generateImageViaYandexArt(`${prompt.trim()}${TEST_STYLE_SUFFIX}`);
-    if (!r.dataUrl) return { ok: false, error: r.error ?? "неизвестная ошибка" };
-    const d = ensureDataPrefix(r.dataUrl);
-    return { ok: true, dataUrl: d, bytesKb: dataUrlKb(d) };
+    if (!(await isBackendAvailable()))
+      return {
+        ok: false,
+        error:
+          "Yandex не настроен: запустите прокси — npm --prefix server run server (ключи читаются из .env на сервере).",
+      };
+    const dataUrl = await backendGenerateImage(`${prompt.trim()}${TEST_STYLE_SUFFIX}`);
+    return { ok: true, dataUrl, bytesKb: dataUrlKb(dataUrl) };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? `${e.name}: ${e.message}` : String(e) };
   }

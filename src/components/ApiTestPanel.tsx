@@ -19,17 +19,12 @@ type TestOutcome = { provider: string } & (GeminiTestResult | { ok: true; text: 
 
 const CONN_META: Record<ConnMode, { text: string; chip: string; dot: string }> = {
   backend: {
-    text: "канал: бэкенд /api · ключ в серверном .env",
+    text: "Yandex настроен на сервере · ключ в серверном .env",
     chip: "border-fern bg-fern/10 text-moss",
     dot: "bg-fern",
   },
-  env: {
-    text: "канал: yandex.env.json · CORS обходит relay",
-    chip: "border-marigold bg-marigold/15 text-pine",
-    dot: "bg-marigold",
-  },
   off: {
-    text: "канал: нет — Yandex недоступен, работает Pollinations",
+    text: "Yandex не настроен · запусти npm --prefix server run server",
     chip: "border-coral bg-coral/10 text-coral",
     dot: "bg-coral",
   },

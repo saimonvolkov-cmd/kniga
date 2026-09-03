@@ -166,10 +166,8 @@ export default function App() {
       setSt("story", "active");
       addLog(
         connMode === "backend"
-          ? "Narrative: история через бэкенд /api/generate-text (YandexGPT, ключ на сервере)"
-          : connMode === "env"
-            ? "Narrative: YandexGPT из браузера (yandex.env.json, CORS обходит relay)"
-            : "Narrative: Yandex недоступен — история через локальный движок"
+          ? "Narrative: история через прокси /api/yandex/generate-text (YandexGPT, ключ на сервере)"
+          : "Narrative: Yandex не настроен — история через локальный движок"
       );
       const { story, engine } = await generateStoryViaApi(inp, keys, activeSeed);
       if (cancelled()) return;
@@ -341,26 +339,20 @@ export default function App() {
   const st = stepState(step);
   const connMeta: Record<ConnMode | "checking", { label: string; title: string; pill: string; dot: string }> = {
     checking: {
-      label: "проверяю подключение…",
-      title: "Ищу серверный прокси /api и файл yandex.env.json",
+      label: "проверяю Yandex…",
+      title: "Ищу локальный прокси на localhost:3001 (GET /api/yandex/status)",
       pill: "bg-foam text-ink/50",
       dot: "bg-ink/30",
     },
     backend: {
-      label: "бэкенд /api активен",
-      title: "YandexGPT и YandexART идут через node server/index.js — ключ в серверном .env, в браузер не попадает",
+      label: "Yandex настроен на сервере",
+      title: "YandexGPT и YandexART идут через прокси (npm --prefix server run server) — ключ в серверном .env, в браузер не попадает",
       pill: "bg-pine text-marigold",
       dot: "bg-marigold",
     },
-    env: {
-      label: "Yandex · yandex.env.json",
-      title: "Сервер не запущен: ключ из yandex.env.json, CORS обходит relay. Для прода — node server/index.js",
-      pill: "bg-marigold text-pine",
-      dot: "bg-pine",
-    },
     off: {
-      label: "офлайн · демо-режим",
-      title: "Нет ни сервера, ни yandex.env.json: история — локальный движок, картинки — Pollinations",
+      label: "Yandex не настроен",
+      title: "Прокси не запущен или ключ не задан: история — локальный движок, картинки — Gemini/HF/Pollinations. Запустите npm --prefix server run server",
       pill: "bg-paper text-ink/60",
       dot: "bg-ink/30",
     },
@@ -406,9 +398,9 @@ export default function App() {
                 connMeta[connMode].pill
               )}
             >
-              <i className={cx("h-2.5 w-2.5 rounded-full", connMeta[connMode].dot, connMode !== "off" && connMode !== "checking" && "animate-pulse-dot")} />
+              <i className={cx("h-2.5 w-2.5 rounded-full", connMeta[connMode].dot, connMode === "backend" && "animate-pulse-dot")} />
               <span className="hidden sm:inline">{connMeta[connMode].label}</span>
-              <span className="sm:hidden">{connMode === "backend" ? "/api" : connMode === "env" ? "Yandex" : connMode === "off" ? "демо" : "…"}</span>
+              <span className="sm:hidden">{connMode === "backend" ? "Yandex ✓" : connMode === "off" ? "демо" : "…"}</span>
             </span>
           </div>
         </div>

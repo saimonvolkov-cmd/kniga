@@ -1,125 +1,101 @@
-# Серверный прокси Yandex AI Studio
+# Серверный прокси Yandex AI Studio (Express)
 
-Браузер **никогда** не обращается к Yandex API напрямую и не видит ключ:
-все запросы идут через этот сервер, ключ живёт в `.env` (в корне проекта,
-файл в `.gitignore`).
+Yandex AI Studio **не отдаёт CORS-заголовки**, поэтому браузер физически не может
+вызвать его напрямую — это ограничение самого API, а не баг. Единственный путь —
+посредник. Им служит этот Express-сервер: фронтенд ходит на
+`http://localhost:3001/api/yandex/*`, а сервер уже со своим ключом вызывает Yandex.
 
-Сервер написан на чистом Node.js (≥ 18) **без зависимостей** — ничего
-устанавливать не нужно (Express-версия добавляется тривиально, контракты
-эндпоинтов не изменятся).
+- Ключ (`YANDEX_API_KEY`, `YANDEX_FOLDER_ID`) живёт **только в `.env` на сервере** —
+  не в браузере, не в localStorage, не в репозитории (`.env` в `.gitignore`).
+- Остальные провайдеры (Gemini, Hugging Face, Pollinations, Claude) работают из
+  браузера напрямую, как и раньше. Правило «только через сервер» — только для Yandex.
 
-## Запуск
+## Запуск (нужны оба процесса)
 
 ```bash
-# 1) собрать фронтенд (сервер раздаёт dist/ на том же origin)
-npm run build
+# 1) один раз — поставить зависимость прокси
+cd server && npm install && cd ..
 
-# 2) запустить сервер
-node server/index.js
-# → http://127.0.0.1:8787 — и приложение, и /api/*
+# 2) терминал А — фронтенд (Vite dev, http://localhost:5173)
+npm run dev
+
+# 3) терминал Б — прокси (http://localhost:3001)
+npm --prefix server run server        # то же, что: node server/server.js
 ```
 
-Ключи читаются из `.env` (корень проекта или `server/`); настоящие
-переменные окружения имеют приоритет. Если ключей нет, `/api/*` честно
-отвечает `503`, а приложение автоматически откатывается на браузерные
-провайдеры/демо-режим.
+Приложение само найдёт прокси на `localhost:3001` (проба
+`GET /api/yandex/status`). В шапке появится индикатор:
+**«Yandex настроен на сервере»** (зелёный) или **«Yandex не настроен»** (серый).
+
+Если прокси не запущен или ключ не задан, приложение не ломается — Yandex-провайдер
+считается «не настроен», и пайплайн катится по остальным провайдерам
+(Gemini → Hugging Face → Pollinations → демо-движок).
 
 ## Быстрая проверка ключа (до запуска сервера)
 
 ```bash
-node server/smoke-test.js
+npm --prefix server run smoke         # = node server/smoke-test.js
 ```
 
-Скрипт без зависимостей ходит в Yandex **напрямую из Node** (CORS тут не
-действует): синхронный `completion` на `yandexgpt-lite` + асинхронная
-генерация `yandex-art` с поллингом, картинка сохраняется в
-`server/test-image.jpg`. Если скрипт печатает `УСПЕХ` — ключ и роли
+Скрипт ходит в Yandex **напрямую из Node** (тут CORS не действует): синхронный
+`completion` на `yandexgpt-lite` + асинхронная генерация `yandex-art` с поллингом,
+картинка сохраняется в `server/test-image.jpg`. Если печатает `УСПЕХ` — ключ и роли
 `ai.languageModels.user` / `ai.imageGeneration.user` работают.
-
-## Режимы работы приложения
-
-| Канал | Когда | Где ключ |
-|---|---|---|
-| **бэкенд /api** | запущен `node server/index.js` | серверный `.env` (в браузер не попадает) |
-| **yandex.env.json** | сервер не запущен (статическая раздача) | `public/yandex.env.json` — временный тестовый ключ, CORS обходит relay `corsproxy.io` |
-| **офлайн** | нет ни сервера, ни файла | — (история — демо-движок, картинки — Pollinations) |
-
-Канал виден в шапке приложения (пульсирующий индикатор). После проверки
-**замените тестовый ключ** в `yandex.env.json` или удалите файл — в проде
-используйте только серверный режим.
 
 ## Эндпоинты
 
 | Метод | Путь | Тело | Ответ |
 |---|---|---|---|
-| GET | `/api/health` | — | `{ ok, providers: { yandexText, yandexImage } }` (без секретов) |
-| POST | `/api/generate-text` | `{ prompt, system?, temperature?, maxTokens? }` | `{ text, model, route, chars }` |
-| POST | `/api/generate-image` | `{ prompt, seed?, widthRatio?, heightRatio? }` | `{ dataUrl, mimeType }` |
-| POST | `/api/generate` | `{ brief }` | GPT расширяет сцену → ART рисует: `{ prompt, dataUrl }` |
+| GET  | `/api/yandex/status`        | — | `{ ok, configured, providers, model }` (без секретов, без вызова API) |
+| POST | `/api/yandex/generate-text` | `{ prompt, system?, temperature?, maxTokens? }` | `{ text, model, chars }` |
+| POST | `/api/yandex/generate-image`| `{ prompt, seed?, ratio? }` | `{ dataUrl, mimeType, model }` |
 
-### YandexGPT (`/api/generate-text`)
+### YandexGPT (`/api/yandex/generate-text`)
 
-Модель `yandexgpt-lite`, формат `gpt://<folder>/yandexgpt-lite`.
-Основной путь — синхронный OpenAI-совместимый REST
-`POST https://ai.api.cloud.yandex.net/v1/responses`
-(`temperature`, `max_output_tokens`). Если маршрут недоступен —
-проверенный асинхронный `completionAsync` + поллинг операции.
+Модель `yandexgpt` (переопределяется `YANDEX_TEXT_MODEL`), формат
+`gpt://<folder>/<model>`. Асинхронный `completionAsync` → поллинг операции
+(перенесён с фронтенда) → `alternatives[0].message.text`.
 
 ```bash
-curl -s http://127.0.0.1:8787/api/generate-text \
+curl -s http://localhost:3001/api/yandex/generate-text \
   -H 'content-type: application/json' \
-  -d '{"prompt":"Придумай 3 необычные идеи для стартапа в сфере путешествий.","temperature":0.8,"maxTokens":1000}'
+  -d '{"prompt":"Придумай 3 необычные идеи для стартапа в сфере путешествий."}'
 ```
 
-### YandexART (`/api/generate-image`)
+### YandexART (`/api/yandex/generate-image`)
 
-Асинхронная генерация: `textToImageAsync` (фолбэк `imageGenerationAsync`)
-→ `id` операции → поллинг `GET /operations/{id}` → `imageBase64`.
-Параметры `ratio` (по умолчанию `1:1`), `mimeType: image/jpeg`,
-опциональный `seed`.
+Асинхронная генерация: `textToImageAsync` (фолбэк `imageGenerationAsync`) → `id`
+операции → поллинг `GET /operations/{id}` → `imageBase64` → dataURL.
+`ratio` по умолчанию `1:1`, `mimeType: JPEG`, опциональный `seed`.
 
 ```bash
-curl -s http://127.0.0.1:8787/api/generate-image \
+curl -s http://localhost:3001/api/yandex/generate-image \
   -H 'content-type: application/json' \
   -d '{"prompt":"a red cat, Miyazaki style","seed":50}' \
-  | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.dataUrl?.slice(0,60)+'…'??j)})"
+  | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);console.log(j.dataUrl?j.dataUrl.slice(0,60)+'…':j)})"
 ```
 
 ## Коды ошибок
 
 | Код | Значение |
 |---|---|
-| 400 | невалидный запрос (нет промпта, промпт длиннее 6000 символов, кривой JSON, параметры вне диапазона) |
+| 400 | невалидный запрос (нет промпта, слишком длинный, кривые параметры) |
 | 404 | нет такого эндпоинта |
-| 429 | rate limit (свой — `Retry-After` в заголовке; либо лимит Yandex) |
-| 502 | ошибка Yandex API (текст ошибки Yandex — как есть, но секреты вычищены) |
-| 503 | ключи не настроены на сервере |
-| 504 | таймаут (GPT 90 с, поллинг ART до 180 с) |
+| 429 | rate limit (прокси: 30 текст / 12 картинок в минуту; либо лимит Yandex) |
+| 502 | ошибка Yandex API (текст Yandex — как есть, но секреты вычищены) |
+| 503 | ключи не настроены на сервере (`configured: false`) |
+| 504 | таймаут поллинга операции |
 
 ## Надёжность и безопасность
 
-- **Retry**: 1 повтор на временные ошибки (сеть, таймаут, 5xx, 429) с паузой 0.9 с.
-- **Rate limiting**: скользящее окно 60 с на IP — 30/мин текст, 12/мин картинки,
-  8/мин комбо, 90/мин всего (переопределяется переменными `RATE_*`).
-- **Валидация**: тип и длина промпта, диапазоны `temperature`/`maxTokens`/`seed`/`ratio`,
-  лимит тела запроса 200 КБ.
-- **CORS**: same-origin (статика раздаётся с того же порта) + `localhost:*`;
-  дополнительные домены — через `CORS_ORIGIN=a,b`.
-- **Секреты**: ключ не логируется и не попадает в ответы — все исходящие
-  тексты проходят через `redact()`. Продакшен-ключ живёт только в `.env`
-  (в `.gitignore`). В `public/yandex.env.json` лежит **временный тестовый**
-  ключ для браузерного режима без сервера — после проверки его нужно
-  заменить или удалить файл.
-
-## Фронтенд
-
-Окна ввода ключей в приложении **нет** — канал выбирается автоматически:
-при открытии через этот сервер приложение обнаруживает бэкенд
-(`GET /api/health`) и переводит YandexGPT/YandexART на `/api/*`; без
-сервера берёт ключ из `yandex.env.json` и обходит CORS через relay. Индикатор
-активного канала — в шапке. Тестовые прогоны — в панели «Тест генерации».
+- **Rate limiting**: скользящее окно 60 с на IP (переопределяется `RATE_*`).
+- **Валидация**: тип/длина промпта, диапазоны `temperature`/`maxTokens`/`seed`/`ratio`.
+- **CORS**: разрешены только локальные origins (vite 5173, статика) — Yandex при этом
+  остаётся недоступен браузеру напрямую.
+- **Секреты**: ключ не логируется и не попадает в ответы — исходящие тексты проходят
+  через `redact()`. В репозитории ключа нет (`.env` в `.gitignore`).
 
 ## Важно про ключи
 
-Ключ, присланный в переписке, считайте скомпрометированным: отзовите его
-в Yandex Cloud → IAM → API-ключи и создайте новый прямо в `.env`.
+Ключ, присланный в переписке, считайте скомпрометированным: отзовите его в
+Yandex Cloud → IAM → API-ключи и создайте новый прямо в `.env`.
