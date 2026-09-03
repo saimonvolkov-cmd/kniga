@@ -4,8 +4,8 @@ import type {
 } from "./types";
 import { getPalette } from "./data/content";
 import {
-  generateStoryViaApi, loadKeys, saveKeys, generateIllustration, resetQuotaBreaker,
-  isBackendAvailable, isQuotaError, type ImageCallResult,
+  generateStoryViaApi, loadKeys, generateIllustration, resetQuotaBreaker,
+  detectConnection, isQuotaError, type ConnMode, type ImageCallResult,
 } from "./lib/api";
 import { moderateStory } from "./lib/safety";
 import { KIND_NOUN } from "./lib/storyEngine";
@@ -21,9 +21,8 @@ import {
 } from "./components/steps";
 import { ProgressScreen } from "./components/ProgressScreen";
 import { BookScreen } from "./components/BookScreen";
-import { SettingsModal } from "./components/SettingsModal";
 import { ApiTestPanel } from "./components/ApiTestPanel";
-import { IconBook, IconCheck, IconGear, IconMoon, IconSparkle, IconStar } from "./components/icons";
+import { IconBook, IconCheck, IconMoon, IconSparkle, IconStar } from "./components/icons";
 
 type Phase = "survey" | "progress" | "book";
 
@@ -54,8 +53,8 @@ export default function App() {
   const [step, setStep] = useState(0);
   const [draft, setDraft] = useState<SurveyDraft>(emptyDraft());
   const [seed, setSeed] = useState(7);
-  const [keys, setKeys] = useState<ApiKeys>(() => loadKeys());
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  /** легаси-ключи из localStorage (окно ввода убрано — ключи живут в .env / yandex.env.json) */
+  const [keys] = useState<ApiKeys>(() => loadKeys());
   const [book, setBook] = useState<GeneratedBook | null>(null);
   const [toasts, setToasts] = useState<ToastItem[]>([]);
 
@@ -68,10 +67,10 @@ export default function App() {
   const [generating, setGenerating] = useState(false);
   /** первая ошибка API-иллюстраций за прогон — видна на экране прогресса и в книге */
   const [geminiError, setGeminiError] = useState<string | null>(null);
-  /** запущен ли серверный прокси (node server/index.js) — тогда Yandex ходит через /api */
-  const [backendOn, setBackendOn] = useState(false);
+  /** какой канал Yandex активен: бэкенд /api · yandex.env.json · офлайн */
+  const [connMode, setConnMode] = useState<ConnMode | "checking">("checking");
   useEffect(() => {
-    void isBackendAvailable().then(setBackendOn);
+    void detectConnection().then(setConnMode);
   }, []);
 
   const runToken = useRef(0);
@@ -166,11 +165,11 @@ export default function App() {
       /* 1 — история */
       setSt("story", "active");
       addLog(
-        keys.anthropic
-          ? "Narrative: вызываю Claude Sonnet…"
-          : keys.gemini
-            ? "Narrative: Anthropic не подключён — история через Gemini (запасной вариант)"
-            : "Narrative: ключи не заданы — локальный движок"
+        connMode === "backend"
+          ? "Narrative: история через бэкенд /api/generate-text (YandexGPT, ключ на сервере)"
+          : connMode === "env"
+            ? "Narrative: YandexGPT из браузера (yandex.env.json, CORS обходит relay)"
+            : "Narrative: Yandex недоступен — история через локальный движок"
       );
       const { story, engine } = await generateStoryViaApi(inp, keys, activeSeed);
       if (cancelled()) return;
@@ -308,7 +307,7 @@ export default function App() {
       setGenerating(false);
       toast("ok", "Книга готова — приятного чтения!");
     },
-    [keys, draft.childPhotos, draft.companionPhotos, toast]
+    [keys, draft.childPhotos, draft.companionPhotos, toast, connMode]
   );
 
   /* ── скачивание PDF ───────────────────────────────────────────────────── */
@@ -340,24 +339,32 @@ export default function App() {
   }, [book, toast]);
 
   const st = stepState(step);
-  const apiMode = Boolean(keys.gemini || keys.anthropic || keys.huggingface);
-  const apiLabel =
-    keys.anthropic && keys.gemini ? "API подключены"
-    : keys.anthropic ? "Claude подключён"
-    : keys.gemini && keys.huggingface ? "Gemini + HF"
-    : keys.gemini ? "Gemini · запасной путь"
-    : keys.huggingface ? "Hugging Face · запасной"
-    : "Демо-режим";
-  const apiTitle =
-    keys.gemini && !keys.anthropic
-      ? "История генерируется через Gemini (запасной вариант) — ключ Anthropic не подключён"
-      : keys.anthropic && keys.gemini
-        ? "История: Claude Sonnet · иллюстрации: Gemini (запасной — Hugging Face)"
-        : keys.huggingface && !keys.gemini
-          ? "Иллюстрации: Hugging Face (krea/Krea-2-Turbo через fal-ai) — Gemini не подключён"
-          : keys.anthropic
-            ? "История: Claude Sonnet · иллюстрации: демо-движок"
-            : "Без ключей пайплайн работает на локальном демо-движке";
+  const connMeta: Record<ConnMode | "checking", { label: string; title: string; pill: string; dot: string }> = {
+    checking: {
+      label: "проверяю подключение…",
+      title: "Ищу серверный прокси /api и файл yandex.env.json",
+      pill: "bg-foam text-ink/50",
+      dot: "bg-ink/30",
+    },
+    backend: {
+      label: "бэкенд /api активен",
+      title: "YandexGPT и YandexART идут через node server/index.js — ключ в серверном .env, в браузер не попадает",
+      pill: "bg-pine text-marigold",
+      dot: "bg-marigold",
+    },
+    env: {
+      label: "Yandex · yandex.env.json",
+      title: "Сервер не запущен: ключ из yandex.env.json, CORS обходит relay. Для прода — node server/index.js",
+      pill: "bg-marigold text-pine",
+      dot: "bg-pine",
+    },
+    off: {
+      label: "офлайн · демо-режим",
+      title: "Нет ни сервера, ни yandex.env.json: история — локальный движок, картинки — Pollinations",
+      pill: "bg-paper text-ink/60",
+      dot: "bg-ink/30",
+    },
+  };
 
   const ambient = (
     <div className="pointer-events-none fixed inset-0 z-0 overflow-hidden" aria-hidden>
@@ -374,17 +381,6 @@ export default function App() {
     <div className="relative min-h-screen">
       {ambient}
       <Toasts items={toasts} onClose={(id) => setToasts((t) => t.filter((x) => x.id !== id))} />
-      <SettingsModal
-        open={settingsOpen}
-        keys={keys}
-        onClose={() => setSettingsOpen(false)}
-        onToast={toast}
-        onSave={(k) => {
-          setKeys(k);
-          saveKeys(k);
-          toast("ok", k.gemini || k.anthropic || k.huggingface ? "Ключи сохранены — пайплайн пойдёт через API" : "Ключи очищены — включён демо-режим");
-        }}
-      />
 
       <header className="sticky top-0 z-40 border-b-[3px] border-ink bg-mist/90 backdrop-blur-md">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-3 px-4 py-3">
@@ -403,26 +399,17 @@ export default function App() {
                 глава {step + 1} / {CHAPTERS.length}
               </span>
             )}
-            {backendOn && (
-              <span
-                title="Запущен серверный прокси (server/index.js): YandexGPT и YandexART вызываются через /api/*, ключ хранится в серверном .env и не попадает в браузер"
-                className="animate-pop hidden items-center gap-1.5 rounded-xl border-[2.5px] border-ink bg-pine px-3 py-1.5 font-display text-[12.5px] font-bold text-marigold shadow-block-sm md:flex"
-              >
-                <IconCheck className="h-4 w-4" strokeWidth={3} />
-                бэкенд /api активен
-              </span>
-            )}
-            <button
-              onClick={() => setSettingsOpen(true)}
-              title={apiTitle}
+            <span
+              title={connMeta[connMode].title}
               className={cx(
-                "btn-press flex items-center gap-2 rounded-xl border-[2.5px] border-ink px-3 py-1.5 font-display text-[12.5px] font-bold shadow-block-sm",
-                apiMode ? "bg-fern text-paper" : "bg-paper text-pine"
+                "animate-pop flex items-center gap-2 rounded-xl border-[2.5px] border-ink px-3 py-1.5 font-display text-[12px] font-bold shadow-block-sm",
+                connMeta[connMode].pill
               )}
             >
-              <IconGear className="h-4 w-4" />
-              {apiLabel}
-            </button>
+              <i className={cx("h-2.5 w-2.5 rounded-full", connMeta[connMode].dot, connMode !== "off" && connMode !== "checking" && "animate-pulse-dot")} />
+              <span className="hidden sm:inline">{connMeta[connMode].label}</span>
+              <span className="sm:hidden">{connMode === "backend" ? "/api" : connMode === "env" ? "Yandex" : connMode === "off" ? "демо" : "…"}</span>
+            </span>
           </div>
         </div>
       </header>
@@ -462,7 +449,7 @@ export default function App() {
                 })}
               </ol>
               <div className="mt-5">
-                <ApiTestPanel keys={keys} onOpenSettings={() => setSettingsOpen(true)} />
+                <ApiTestPanel />
               </div>
             </aside>
 

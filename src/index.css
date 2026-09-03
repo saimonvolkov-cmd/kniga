@@ -124,6 +124,12 @@ body {
 }
 .animate-dot { animation: dot-bounce 1.1s ease-in-out infinite; }
 
+@keyframes pulse-dot {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.55); opacity: 0.5; }
+}
+.animate-pulse-dot { animation: pulse-dot 1.6s ease-in-out infinite; }
+
 .log-scroll::-webkit-scrollbar { width: 8px; }
 .log-scroll::-webkit-scrollbar-thumb { background: rgba(236, 223, 200, 0.35); border-radius: 8px; }
 ::-webkit-scrollbar { width: 11px; }

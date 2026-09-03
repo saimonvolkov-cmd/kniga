@@ -184,7 +184,7 @@ export function BookScreen({
               </pre>
             )}
             <p className="mt-2 text-[12.5px] font-bold leading-snug text-ink/60">
-              Проверьте ключи: настройки → «Проверить ключ» или панель «Тест Gemini / Hugging Face». Если у ключа нулевая квота — включите биллинг в Google AI Studio или добавьте токен Hugging Face.
+              Проверьте генерацию в панели «Тест генерации» или запустите прокси «node server/index.js» (ключ — в серверном .env, окно ввода убрано). Если у Gemini нулевая квота — включите биллинг в Google AI Studio либо положитесь на Yandex/Pollinations.
             </p>
           </div>
         )}
