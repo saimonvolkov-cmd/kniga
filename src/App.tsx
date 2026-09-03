@@ -67,11 +67,8 @@ export default function App() {
   const [generating, setGenerating] = useState(false);
   /** первая ошибка API-иллюстраций за прогон — видна на экране прогресса и в книге */
   const [geminiError, setGeminiError] = useState<string | null>(null);
-  /** какой канал Yandex активен: бэкенд /api · yandex.env.json · офлайн */
+  /** какой канал Yandex активен: прокси на сервере или нет (обновляется авто-опросом) */
   const [connMode, setConnMode] = useState<ConnMode | "checking">("checking");
-  useEffect(() => {
-    void detectConnection().then(setConnMode);
-  }, []);
 
   const runToken = useRef(0);
   const toastId = useRef(0);
@@ -84,6 +81,37 @@ export default function App() {
     setToasts((t) => [...t.slice(-3), { id, kind, text }]);
     window.setTimeout(() => setToasts((t) => t.filter((x) => x.id !== id)), 3800);
   }, []);
+
+  /* Живой опрос прокси: пока Yandex не найден, спрашиваем localhost:3001 каждые
+     4 секунды. Как только пользователь запускает «npm --prefix server run server»,
+     индикатор в шапке сам становится зелёным — без перезагрузки страницы. */
+  useEffect(() => {
+    let stop = false;
+    let timer: number | undefined;
+    const probe = async () => {
+      const mode = await detectConnection(true);
+      if (stop) return;
+      setConnMode((prev) => {
+        if (prev !== "backend" && mode === "backend")
+          toast("ok", "Yandex-прокси найден — провайдер подключён");
+        return mode;
+      });
+      if (mode !== "backend") timer = window.setTimeout(() => void probe(), 4000);
+    };
+    void probe();
+    return () => {
+      stop = true;
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [toast]);
+
+  const copyServerCmd = useCallback(() => {
+    const cmd = "npm --prefix server run server";
+    void navigator.clipboard
+      ?.writeText(cmd)
+      .then(() => toast("ok", `Скопировано: ${cmd}`))
+      .catch(() => toast("warn", `Запустите в терминале: ${cmd}`));
+  }, [toast]);
 
   useEffect(() => {
     window.scrollTo({ top: 0 });
@@ -391,17 +419,26 @@ export default function App() {
                 глава {step + 1} / {CHAPTERS.length}
               </span>
             )}
-            <span
-              title={connMeta[connMode].title}
+            <button
+              type="button"
+              onClick={() => {
+                if (connMode === "off") copyServerCmd();
+              }}
+              title={
+                connMode === "off"
+                  ? `${connMeta[connMode].title} — кликните, чтобы скопировать команду запуска`
+                  : connMeta[connMode].title
+              }
               className={cx(
                 "animate-pop flex items-center gap-2 rounded-xl border-[2.5px] border-ink px-3 py-1.5 font-display text-[12px] font-bold shadow-block-sm",
-                connMeta[connMode].pill
+                connMeta[connMode].pill,
+                connMode === "off" && "btn-press cursor-pointer"
               )}
             >
               <i className={cx("h-2.5 w-2.5 rounded-full", connMeta[connMode].dot, connMode === "backend" && "animate-pulse-dot")} />
               <span className="hidden sm:inline">{connMeta[connMode].label}</span>
               <span className="sm:hidden">{connMode === "backend" ? "Yandex ✓" : connMode === "off" ? "демо" : "…"}</span>
-            </span>
+            </button>
           </div>
         </div>
       </header>

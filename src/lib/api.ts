@@ -461,9 +461,10 @@ export async function isBackendAvailable(force = false): Promise<boolean> {
   return (await getBackendBase(force)) !== null;
 }
 
-/** Лёгкий статус для индикатора в шапке: настроен ли Yandex на сервере */
-export async function detectConnection(): Promise<ConnMode> {
-  return (await isBackendAvailable()) ? "backend" : "off";
+/** Лёгкий статус для индикатора в шапке: настроен ли Yandex на сервере.
+    `force` сбрасывает кэш и спрашивает прокси заново (нужно для авто-опроса). */
+export async function detectConnection(force = false): Promise<ConnMode> {
+  return (await isBackendAvailable(force)) ? "backend" : "off";
 }
 
 async function backendPost(path: string, payload: unknown, timeoutMs: number): Promise<string> {

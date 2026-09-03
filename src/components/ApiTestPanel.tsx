@@ -38,14 +38,16 @@ export function ApiTestPanel() {
   const [result, setResult] = useState<TestOutcome | null>(null);
   const [conn, setConn] = useState<ConnMode | null>(null);
 
+  /** всегда спрашиваем прокси заново — кэш не должен врать */
   const probe = () => {
-    if (conn) return;
-    void detectConnection().then(setConn);
+    void detectConnection(true).then(setConn);
   };
 
   const run = async (provider: Provider) => {
     setLoading(provider);
     setResult(null);
+    const mode = await detectConnection(true);
+    setConn(mode);
     const r =
       provider === "yandex-gpt"
         ? await testYandexGpt(prompt)
