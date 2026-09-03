@@ -56,6 +56,12 @@ function SourceSticker({ page }: { page: GeneratedPage }) {
         Hugging Face
       </span>
     );
+  if (page.imageSource === "pollinations")
+    return (
+      <span className="absolute left-3 top-3 z-10 -rotate-2 rounded-lg border-2 border-ink bg-moss px-2 py-1 text-[10.5px] font-extrabold uppercase tracking-wide text-paper shadow-block-sm">
+        Pollinations · без ключа
+      </span>
+    );
   if (page.imageSource === "gemini")
     return (
       <span className="absolute left-3 top-3 z-10 -rotate-2 rounded-lg border-2 border-ink bg-sea px-2 py-1 text-[10.5px] font-extrabold uppercase tracking-wide text-paper shadow-block-sm">
@@ -154,6 +160,7 @@ export function BookScreen({
           <p className="mt-3 text-[12.5px] font-extrabold text-ink/55">
             иллюстрации: <span className="text-sea">Gemini {rep.gemini}</span> ·{" "}
             <span className={rep.hf ? "text-berry" : "text-ink/40"}>Hugging Face {rep.hf}</span> ·{" "}
+            <span className={rep.pollinations ? "text-moss" : "text-ink/40"}>Pollinations {rep.pollinations}</span> ·{" "}
             <span className={rep.demo ? "text-coral" : "text-ink/40"}>демо {rep.demo}</span>
           </p>
         )}

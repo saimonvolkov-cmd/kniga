@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { ApiKeys } from "../types";
-import { checkGeminiKey, checkHuggingFaceKey } from "../lib/api";
+import { checkGeminiKey, checkHuggingFaceKey, hfTokenFormatHint } from "../lib/api";
 import { ChunkyButton, cx } from "./ui";
 import { IconGear, IconX } from "./icons";
 
@@ -19,6 +19,8 @@ export function SettingsModal({
   const [checking, setChecking] = useState<null | "gemini" | "hf">(null);
   const [checkGemini, setCheckGemini] = useState<{ ok: boolean; detail: string } | null>(null);
   const [checkHf, setCheckHf] = useState<{ ok: boolean; detail: string } | null>(null);
+
+  const hfFormatHint = hfTokenFormatHint(hf);
 
   const runCheck = async (which: "gemini" | "hf") => {
     setChecking(which);
@@ -94,6 +96,11 @@ export function SettingsModal({
             placeholder="hf_…"
             className="field-input w-full px-4 py-2.5 font-mono text-sm font-bold text-pine"
           />
+          {hfFormatHint && (
+            <p className="animate-pop mt-2 break-words rounded-lg border-2 border-marigold bg-marigold/15 px-2.5 py-1.5 text-[12px] font-bold leading-snug text-pine">
+              {hfFormatHint}
+            </p>
+          )}
           {checkHf && (
             <p className={cx("animate-pop mt-2 break-words rounded-lg border-2 px-2.5 py-1.5 text-[12px] font-bold leading-snug", checkHf.ok ? "border-fern bg-fern/10 text-moss" : "border-coral bg-coral/10 text-coral")}>
               {checkHf.detail}

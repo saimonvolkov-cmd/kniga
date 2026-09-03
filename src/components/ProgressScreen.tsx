@@ -64,7 +64,7 @@ export function ProgressScreen({
 {geminiError}
             </pre>
             <p className="mt-1.5 text-[11.5px] font-bold leading-snug text-ink/55">
-              Если задан ключ Hugging Face — пайплайн уже попробовал и его (см. строки выше). Иначе: настройки → «Проверить ключ» или панель «Тест Gemini / Hugging Face».
+              Пайплайн уже прошёл каскад Gemini → Hugging Face → бесплатный Pollinations (см. строки выше). Проверить каждый провайдер по отдельности можно в панели «Тест провайдеров картинок» — там же есть кнопка «Без ключа».
             </p>
           </div>
         )}

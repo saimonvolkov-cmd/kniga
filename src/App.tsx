@@ -131,7 +131,7 @@ export default function App() {
       let firstErr: string | null = null;
       const noteImage = (r: ImageCallResult) => {
         if (r.dataUrl) return;
-        const prefix = r.via === "huggingface" ? "Illustration" : "Gemini";
+        const prefix = r.via === "huggingface" ? "Hugging Face" : r.via === "pollinations" ? "Pollinations" : "Gemini";
         addLog(`${prefix}: ${r.error}`);
         if (!firstErr) {
           firstErr = r.error ?? "неизвестная ошибка";
@@ -145,9 +145,15 @@ export default function App() {
         }
       };
       const sourceOf = (r: ImageCallResult): ImageSource =>
-        r.dataUrl ? (r.via === "huggingface" ? "huggingface" : "gemini") : "demo";
+        r.dataUrl ? (r.via === "huggingface" ? "huggingface" : r.via === "pollinations" ? "pollinations" : "gemini") : "demo";
       const labelOf = (r: ImageCallResult): string =>
-        r.dataUrl ? (r.via === "huggingface" ? "Hugging Face" : "Gemini") : "демо-SVG";
+        r.dataUrl
+          ? r.via === "huggingface"
+            ? "Hugging Face"
+            : r.via === "pollinations"
+              ? "Pollinations"
+              : "Gemini"
+          : "демо-SVG";
 
       console.log("[Input JSON → Narrative Module]", inp);
       addLog("Survey: Input JSON собран и отправлен в Narrative Module");
@@ -253,13 +259,11 @@ export default function App() {
       acc.push(backPage);
       setPages([...acc]);
       setLatest(backPage);
-      const apiDrawn = acc.filter((p) => p.imageSource === "gemini" || p.imageSource === "huggingface").length;
+      const apiDrawn = acc.filter((p) => p.imageSource === "gemini" || p.imageSource === "huggingface" || p.imageSource === "pollinations").length;
       setSt(
         "spreads",
         apiDrawn === acc.length ? "done" : "warn",
-        (keys.gemini || keys.huggingface)
-          ? `через API: ${apiDrawn} из ${acc.length}` + (apiDrawn < acc.length ? " — причина в красном плашке" : "")
-          : `${story.spreads.length} демо-иллюстраций (ключи не заданы)`
+        `через API: ${apiDrawn} из ${acc.length}` + (apiDrawn < acc.length ? " — причина в красном плашке" : "")
       );
 
       /* 6 — вёрстка */
@@ -279,9 +283,16 @@ export default function App() {
 
       const geminiDrawn = acc.filter((p) => p.imageSource === "gemini").length;
       const hfDrawn = acc.filter((p) => p.imageSource === "huggingface").length;
+      const polDrawn = acc.filter((p) => p.imageSource === "pollinations").length;
       const generated: GeneratedBook = {
         input: inp, story, pages: acc, engine, moderated: report, seed: activeSeed,
-        imageReport: { gemini: geminiDrawn, hf: hfDrawn, demo: acc.length - geminiDrawn - hfDrawn, firstError: firstErr },
+        imageReport: {
+          gemini: geminiDrawn,
+          hf: hfDrawn,
+          pollinations: polDrawn,
+          demo: acc.length - geminiDrawn - hfDrawn - polDrawn,
+          firstError: firstErr,
+        },
       };
       console.log("[GeneratedBook]", generated);
       setBook(generated);

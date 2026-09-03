@@ -132,7 +132,7 @@ export interface ImageCallResult {
   dataUrl: string | null;
   error: string | null;
   /** какой провайдер отработал (или пытался последним) */
-  via?: "gemini" | "huggingface";
+  via?: "gemini" | "huggingface" | "pollinations";
 }
 
 const extractError = (status: number, context: string, body: string): string => {
@@ -375,9 +375,30 @@ export async function generateImageViaHuggingFace(prompt: string, keys: ApiKeys 
   return { dataUrl: null, error: lastError, via: "huggingface" };
 }
 
-/** Illustration Module: выбор провайдера. Gemini — первый; если ключ не задан
-    или вызов упал (квота/регион/фильтр) и есть HUGGINGFACE_API_KEY — пробуем
-    Hugging Face с тем же промптом. Оба упали → null, пайплайн рисует демо. */
+/* ── Pollinations — бесплатный провайдер без ключа (flux / turbo) ─────────
+   Третья, финальная ступень каскада: не требует вообще никакого ключа,
+   поэтому книга всегда может быть нарисована нейросетью, даже если и Gemini,
+   и Hugging Face недоступны. Тот же промпт/стиль, что идёт в Gemini. */
+export async function generateImageViaPollinations(prompt: string): Promise<ImageCallResult> {
+  try {
+    const url =
+      `https://image.pollinations.ai/prompt/${encodeURIComponent(prompt)}` +
+      `?width=1024&height=1024&nologo=true&model=flux&seed=${Math.floor(Math.random() * 1e9)}`;
+    const res = await fetch(url, { referrerPolicy: "no-referrer" });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const ct = res.headers.get("content-type") ?? "image/jpeg";
+    if (!ct.startsWith("image/")) throw new Error(`ответ не картинка (content-type: ${ct})`);
+    return { dataUrl: await blobToDataUrl(await res.blob()), error: null, via: "pollinations" };
+  } catch (e) {
+    const msg = `Pollinations: ${e instanceof Error ? e.message : String(e)}`;
+    console.warn(`[illustration] ${msg}`);
+    return { dataUrl: null, error: msg, via: "pollinations" };
+  }
+}
+
+/** Illustration Module: выбор провайдера. Порядок: Gemini → Hugging Face
+    (fal-ai / классический) → Pollinations (без ключа). Все упали → null,
+    пайплайн рисует демо-движком. */
 export async function generateIllustration(
   prompt: string,
   referencePhotos: string[],
@@ -385,13 +406,18 @@ export async function generateIllustration(
 ): Promise<ImageCallResult> {
   const gemini = await generateImageViaApi(prompt, referencePhotos, keys);
   if (gemini.dataUrl) return gemini;
+  const errors: string[] = [`Gemini: ${gemini.error}`];
   if (keys?.huggingface) {
-    console.info(`[illustration] Gemini не смог (${gemini.error}) — пробуем Hugging Face (fal-ai)`);
+    console.info(`[illustration] Gemini не смог — пробуем Hugging Face`);
     const hf = await generateImageViaHuggingFace(prompt, keys);
     if (hf.dataUrl) return { ...hf, via: "huggingface" };
-    return { dataUrl: null, error: `Gemini: ${gemini.error}\nHugging Face: ${hf.error}`, via: "huggingface" };
+    errors.push(`Hugging Face: ${hf.error}`);
   }
-  return gemini;
+  console.info(`[illustration] пробуем бесплатный Pollinations (без ключа)`);
+  const pol = await generateImageViaPollinations(prompt);
+  if (pol.dataUrl) return { ...pol, via: "pollinations" };
+  errors.push(pol.error ?? "Pollinations: неизвестная ошибка");
+  return { dataUrl: null, error: errors.join("\n"), via: "pollinations" };
 }
 
 /* ── Тестовые вызовы (диагностическая панель) — ошибки как есть ─────────── */
@@ -434,6 +460,26 @@ export async function testHuggingFaceImage(prompt: string, apiKey: string): Prom
   } catch (e) {
     return { ok: false, error: e instanceof Error ? `${e.name}: ${e.message}` : String(e) };
   }
+}
+
+/** Бесплатный тест без ключа — генерация через Pollinations (flux) */
+export async function testPollinationsImage(prompt: string): Promise<GeminiTestResult> {
+  try {
+    const r = await generateImageViaPollinations(`${prompt.trim()}${TEST_STYLE_SUFFIX}`);
+    if (!r.dataUrl) return { ok: false, error: r.error ?? "неизвестная ошибка" };
+    return { ok: true, dataUrl: r.dataUrl, bytesKb: dataUrlKb(r.dataUrl) };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? `${e.name}: ${e.message}` : String(e) };
+  }
+}
+
+/** Проверка формата токена Hugging Face (должен начинаться с hf_) */
+export function hfTokenFormatHint(token: string): string | null {
+  const t = token.trim();
+  if (!t) return null;
+  if (!t.startsWith("hf_")) return "Токен Hugging Face начинается с «hf_». Похоже, ключ вставлен не полностью или это ключ от другого сервиса.";
+  if (t.length < 20) return "Токен выглядит слишком коротким — проверьте, что скопирован целиком.";
+  return null;
 }
 
 /** Быстрая проверка ключа Gemini: дешёвый GET models?pageSize=1 */
