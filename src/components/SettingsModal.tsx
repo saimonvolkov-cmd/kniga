@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { ApiKeys } from "../types";
-import { checkGeminiKey, checkHuggingFaceKey, hfTokenFormatHint } from "../lib/api";
+import { checkGeminiKey, checkHuggingFaceKey, checkYandexKey, hfTokenFormatHint } from "../lib/api";
 import { ChunkyButton, cx } from "./ui";
 import { IconGear, IconX } from "./icons";
 
@@ -16,19 +16,29 @@ export function SettingsModal({
   const [gemini, setGemini] = useState(keys.gemini);
   const [anthropic, setAnthropic] = useState(keys.anthropic);
   const [hf, setHf] = useState(keys.huggingface);
-  const [checking, setChecking] = useState<null | "gemini" | "hf">(null);
+  const [yandexKey, setYandexKey] = useState(keys.yandexApiKey);
+  const [yandexFolder, setYandexFolder] = useState(keys.yandexFolderId);
+  const [checking, setChecking] = useState<null | "gemini" | "hf" | "yandex">(null);
   const [checkGemini, setCheckGemini] = useState<{ ok: boolean; detail: string } | null>(null);
   const [checkHf, setCheckHf] = useState<{ ok: boolean; detail: string } | null>(null);
+  const [checkYandex, setCheckYandex] = useState<{ ok: boolean; detail: string } | null>(null);
 
   const hfFormatHint = hfTokenFormatHint(hf);
 
-  const runCheck = async (which: "gemini" | "hf") => {
+  const runCheck = async (which: "gemini" | "hf" | "yandex") => {
     setChecking(which);
     if (which === "gemini") setCheckGemini(null);
-    else setCheckHf(null);
-    const r = which === "gemini" ? await checkGeminiKey(gemini.trim()) : await checkHuggingFaceKey(hf.trim());
+    else if (which === "hf") setCheckHf(null);
+    else setCheckYandex(null);
+    const r =
+      which === "gemini"
+        ? await checkGeminiKey(gemini.trim())
+        : which === "hf"
+          ? await checkHuggingFaceKey(hf.trim())
+          : await checkYandexKey(yandexKey.trim(), yandexFolder.trim());
     if (which === "gemini") setCheckGemini(r);
-    else setCheckHf(r);
+    else if (which === "hf") setCheckHf(r);
+    else setCheckYandex(r);
     setChecking(null);
   };
 
@@ -108,6 +118,48 @@ export function SettingsModal({
           )}
         </div>
 
+        <div className="mb-4 rounded-2xl border-[2.5px] border-marigold/70 bg-marigold/10 p-3.5">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="font-display text-sm font-bold text-pine">Yandex Cloud <span className="font-body text-[11px] font-bold text-ink/45">— история (YandexGPT) + иллюстрации (YandexART)</span></span>
+            <button
+              type="button"
+              onClick={() => void runCheck("yandex")}
+              disabled={checking !== null || !yandexKey.trim() || !yandexFolder.trim()}
+              className="btn-press shrink-0 rounded-lg border-2 border-ink bg-marigold px-2.5 py-1 font-display text-[11px] font-bold text-pine shadow-block-sm disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {checking === "yandex" ? "Проверяю…" : "Проверить"}
+            </button>
+          </div>
+          <label className="mb-2 block">
+            <span className="mb-1 block font-display text-[11px] font-bold uppercase tracking-wider text-ink/50">YANDEX_API_KEY (сервисный ключ)</span>
+            <input
+              type="password"
+              value={yandexKey}
+              onChange={(e) => { setYandexKey(e.target.value); setCheckYandex(null); }}
+              placeholder="API-ключ сервисного аккаунта"
+              className="field-input w-full px-4 py-2 font-mono text-sm font-bold text-pine"
+            />
+          </label>
+          <label className="block">
+            <span className="mb-1 block font-display text-[11px] font-bold uppercase tracking-wider text-ink/50">YANDEX_FOLDER_ID (идентификатор каталога)</span>
+            <input
+              type="text"
+              value={yandexFolder}
+              onChange={(e) => { setYandexFolder(e.target.value); setCheckYandex(null); }}
+              placeholder="b1g…"
+              className="field-input w-full px-4 py-2 font-mono text-sm font-bold text-pine"
+            />
+          </label>
+          {checkYandex && (
+            <p className={cx("animate-pop mt-2 break-words rounded-lg border-2 px-2.5 py-1.5 text-[12px] font-bold leading-snug", checkYandex.ok ? "border-fern bg-fern/10 text-moss" : "border-coral bg-coral/10 text-coral")}>
+              {checkYandex.detail}
+            </p>
+          )}
+          <p className="mt-2 text-[11px] font-bold leading-snug text-ink/50">
+            Нужен сервисный аккаунт с ролями <b>ai.languageModels.user</b> и <b>ai.imageGeneration.user</b> и ключом с областью <b>yc.ai.foundationModels.execute</b>. Ключ показывается один раз при создании.
+          </p>
+        </div>
+
         <label className="mb-5 block">
           <span className="mb-1.5 block font-display text-sm font-bold text-pine">ANTHROPIC_API_KEY <span className="font-body text-[11px] font-bold text-ink/45">— история (Sonnet) и модерация (Haiku)</span></span>
           <input
@@ -126,7 +178,8 @@ export function SettingsModal({
         )}
 
         <div className="mb-5 rounded-xl border-2 border-ink/15 bg-foam p-3.5 text-[12px] font-semibold leading-relaxed text-ink/65">
-          Порядок провайдеров иллюстраций: <b>Gemini → Hugging Face → демо-движок</b>. Ключи хранятся только в вашем localStorage.
+          Порядок провайдеров иллюстраций: <b>Gemini → YandexART → Hugging Face → Pollinations (без ключа) → демо-движок</b>.
+          История: <b>Claude → YandexGPT → Gemini → демо</b>. Ключи хранятся только в вашем localStorage.
           В проде поставьте Node/Express-прокси (<code className="rounded bg-pine px-1 py-0.5 font-mono text-[11px] text-foam">/api/generate-image</code> и др.),
           который читает ключи из <code className="rounded bg-pine px-1 py-0.5 font-mono text-[11px] text-foam">.env</code> — код провайдеров в{" "}
           <code className="rounded bg-pine px-1 py-0.5 font-mono text-[11px] text-foam">src/lib/api.ts</code> переносится без изменений.
@@ -136,13 +189,21 @@ export function SettingsModal({
           <ChunkyButton variant="ghost" onClick={onClose}>Закрыть</ChunkyButton>
           <ChunkyButton
             onClick={() => {
-              const k = { gemini: gemini.trim(), anthropic: anthropic.trim(), huggingface: hf.trim() };
+              const k: ApiKeys = {
+                gemini: gemini.trim(),
+                anthropic: anthropic.trim(),
+                huggingface: hf.trim(),
+                yandexApiKey: yandexKey.trim(),
+                yandexFolderId: yandexFolder.trim(),
+              };
               onSave(k);
               onClose();
               if (k.gemini)
                 void checkGeminiKey(k.gemini).then((r) => onToast?.(r.ok ? "ok" : "err", r.ok ? `Gemini: ${r.detail}` : `Gemini не принимает ключ — ${r.detail}`));
               if (k.huggingface)
                 void checkHuggingFaceKey(k.huggingface).then((r) => onToast?.(r.ok ? "ok" : "err", r.ok ? `Hugging Face: ${r.detail}` : `Hugging Face не принимает токен — ${r.detail}`));
+              if (k.yandexApiKey && k.yandexFolderId)
+                void checkYandexKey(k.yandexApiKey, k.yandexFolderId).then((r) => onToast?.(r.ok ? "ok" : "err", r.ok ? `Yandex: ${r.detail}` : `Yandex не принимает ключ — ${r.detail}`));
             }}
           >
             Сохранить

@@ -1,24 +1,31 @@
 import { useState } from "react";
 import type { ApiKeys } from "../types";
-import { testGeminiImage, testHuggingFaceImage, testPollinationsImage, type GeminiTestResult } from "../lib/api";
+import {
+  testGeminiImage, testHuggingFaceImage, testPollinationsImage, testYandexArt, testYandexGpt,
+  type GeminiTestResult,
+} from "../lib/api";
 import { ChunkyButton, cx } from "./ui";
 import { IconCamera, IconGear } from "./icons";
 
 const DEFAULT_PROMPT = "нарисуй лису в детской книжной иллюстрации";
 
-type Provider = "gemini" | "hf" | "pollinations";
+type Provider = "gemini" | "hf" | "pollinations" | "yandex-gpt" | "yandex-art";
 const PROVIDER_LABEL: Record<Provider, string> = {
   gemini: "Gemini",
   hf: "Hugging Face",
   pollinations: "Pollinations",
+  "yandex-gpt": "YandexGPT",
+  "yandex-art": "YandexART",
 };
+
+type TestOutcome = { provider: string } & (GeminiTestResult | { ok: true; text: string });
 
 /** Диагностика подключения провайдеров — отдельно от основного потока опроса */
 export function ApiTestPanel({ keys, onOpenSettings }: { keys: ApiKeys; onOpenSettings: () => void }) {
   const [open, setOpen] = useState(false);
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [loading, setLoading] = useState<null | Provider>(null);
-  const [result, setResult] = useState<{ provider: string } & GeminiTestResult | null>(null);
+  const [result, setResult] = useState<TestOutcome | null>(null);
 
   const run = async (provider: Provider) => {
     setLoading(provider);
@@ -28,14 +35,20 @@ export function ApiTestPanel({ keys, onOpenSettings }: { keys: ApiKeys; onOpenSe
         ? await testGeminiImage(prompt, keys.gemini)
         : provider === "hf"
           ? await testHuggingFaceImage(prompt, keys.huggingface)
-          : await testPollinationsImage(prompt);
+          : provider === "yandex-gpt"
+            ? await testYandexGpt(prompt, keys.yandexApiKey, keys.yandexFolderId)
+            : provider === "yandex-art"
+              ? await testYandexArt(prompt, keys.yandexApiKey, keys.yandexFolderId)
+              : await testPollinationsImage(prompt);
     setResult({ provider: PROVIDER_LABEL[provider], ...r });
     setLoading(null);
-    if (r.ok) console.info(`[ApiTest:${provider}] изображение получено, ~${r.bytesKb} КБ`);
+    if (r.ok) console.info(`[ApiTest:${provider}] ответ получен`, "bytesKb" in r ? `~${r.bytesKb} КБ` : "(текст)");
     else console.error(`[ApiTest:${provider}] ошибка:\n${r.error}`);
   };
 
-  const hasAnyKey = Boolean(keys.gemini.trim() || keys.huggingface.trim());
+  const hasAnyKey = Boolean(
+    keys.gemini.trim() || keys.huggingface.trim() || (keys.yandexApiKey.trim() && keys.yandexFolderId.trim())
+  );
 
   return (
     <div className="card-paper overflow-hidden">
@@ -47,7 +60,7 @@ export function ApiTestPanel({ keys, onOpenSettings }: { keys: ApiKeys; onOpenSe
           <span>
             <span className="block font-display text-[14px] font-bold leading-tight text-pine">Тест провайдеров картинок</span>
             <span className="block text-[10.5px] font-extrabold uppercase tracking-wider text-ink/45">
-              Gemini · Hugging Face · Pollinations
+              Gemini · Yandex · Hugging Face · без ключа
             </span>
           </span>
         </span>
@@ -60,7 +73,7 @@ export function ApiTestPanel({ keys, onOpenSettings }: { keys: ApiKeys; onOpenSe
         <div className="animate-rise border-t-2 border-dashed border-ink/15 p-4">
           {!hasAnyKey && (
             <div className="mb-3 rounded-xl border-2 border-ink/15 bg-foam p-3 text-[12.5px] font-bold leading-snug text-ink/65">
-              Для Gemini и Hugging Face нужны ключи из настроек, но{" "}
+              Для Gemini, Yandex и Hugging Face нужны ключи из настроек, но{" "}
               <span className="text-moss">Pollinations работает вообще без ключа</span> — начните с него, чтобы убедиться, что генерация картинок жива.
               <ChunkyButton variant="ghost" onClick={onOpenSettings} className="mt-2 w-full py-2 text-[13px]">
                 <IconGear className="h-4 w-4" /> Открыть настройки ключей
@@ -71,15 +84,21 @@ export function ApiTestPanel({ keys, onOpenSettings }: { keys: ApiKeys; onOpenSe
             <span className="mb-1 block font-display text-[12px] font-bold uppercase tracking-wider text-ink/50">Промпт</span>
             <textarea value={prompt} onChange={(e) => setPrompt(e.target.value)} rows={2} className="field-input w-full resize-none px-3 py-2 text-[13.5px] font-bold text-pine" />
           </label>
-          <div className="grid grid-cols-3 gap-2.5">
+          <div className="grid grid-cols-2 gap-2.5">
             <ChunkyButton variant="dark" onClick={() => void run("gemini")} disabled={loading !== null} className="px-2 py-2.5 text-[12.5px]">
               {loading === "gemini" ? "Рисует…" : "Gemini"}
+            </ChunkyButton>
+            <ChunkyButton variant="primary" onClick={() => void run("yandex-art")} disabled={loading !== null} className="px-2 py-2.5 text-[12.5px]">
+              {loading === "yandex-art" ? "Рисует…" : "Проверить YandexART"}
             </ChunkyButton>
             <ChunkyButton variant="coral" onClick={() => void run("hf")} disabled={loading !== null} className="px-2 py-2.5 text-[12.5px]">
               {loading === "hf" ? "Рисует…" : "Hugging Face"}
             </ChunkyButton>
-            <ChunkyButton variant="primary" onClick={() => void run("pollinations")} disabled={loading !== null} className="px-2 py-2.5 text-[12.5px]">
-              {loading === "pollinations" ? "Рисует…" : "Без ключа"}
+            <ChunkyButton variant="dark" onClick={() => void run("yandex-gpt")} disabled={loading !== null} className="px-2 py-2.5 text-[12.5px]">
+              {loading === "yandex-gpt" ? "Пишет…" : "Проверить YandexGPT"}
+            </ChunkyButton>
+            <ChunkyButton variant="ghost" onClick={() => void run("pollinations")} disabled={loading !== null} className="col-span-2 px-2 py-2.5 text-[12.5px]">
+              {loading === "pollinations" ? "Рисует…" : "Без ключа (Pollinations)"}
             </ChunkyButton>
           </div>
 
@@ -91,7 +110,7 @@ export function ApiTestPanel({ keys, onOpenSettings }: { keys: ApiKeys; onOpenSe
             </div>
           )}
 
-          {result && !loading && "ok" in result && result.ok && (
+          {result && !loading && result.ok && "dataUrl" in result && (
             <figure className="animate-pop mt-3">
               <img src={result.dataUrl} alt="Тестовая иллюстрация" className="rounded-xl border-[2.5px] border-ink shadow-block-sm" />
               <figcaption className="mt-1.5 text-center text-[11.5px] font-extrabold text-moss">
@@ -100,7 +119,18 @@ export function ApiTestPanel({ keys, onOpenSettings }: { keys: ApiKeys; onOpenSe
             </figure>
           )}
 
-          {result && !loading && "ok" in result && !result.ok && (
+          {result && !loading && result.ok && "text" in result && (
+            <div className="animate-pop mt-3 overflow-hidden rounded-xl border-[2.5px] border-fern">
+              <p className="bg-fern px-3 py-1.5 font-display text-[11px] font-bold uppercase tracking-wider text-paper">
+                {result.provider} отвечает — история из первых строк
+              </p>
+              <pre className="log-scroll max-h-44 overflow-auto whitespace-pre-wrap bg-paper p-3 font-body text-[12.5px] font-semibold leading-relaxed text-pine">
+{result.text}
+              </pre>
+            </div>
+          )}
+
+          {result && !loading && !result.ok && (
             <div className="animate-pop mt-3 overflow-hidden rounded-xl border-[2.5px] border-coral">
               <p className="bg-coral px-3 py-1.5 font-display text-[11px] font-bold uppercase tracking-wider text-paper">
                 {result.provider} — ошибка от API, как есть

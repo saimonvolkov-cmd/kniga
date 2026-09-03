@@ -64,7 +64,7 @@ export function ProgressScreen({
 {geminiError}
             </pre>
             <p className="mt-1.5 text-[11.5px] font-bold leading-snug text-ink/55">
-              Пайплайн уже прошёл каскад Gemini → Hugging Face → бесплатный Pollinations (см. строки выше). Проверить каждый провайдер по отдельности можно в панели «Тест провайдеров картинок» — там же есть кнопка «Без ключа».
+              Пайплайн уже прошёл каскад Gemini → YandexART → Hugging Face → бесплатный Pollinations (см. строки выше). Проверить каждый провайдер по отдельности можно в панели «Тест провайдеров картинок» — там же есть кнопки «Проверить YandexART/YandexGPT» и «Без ключа».
             </p>
           </div>
         )}

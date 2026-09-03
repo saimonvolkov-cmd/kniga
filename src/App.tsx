@@ -129,9 +129,15 @@ export default function App() {
       const currentPalette = getPalette(inp.palette_id);
 
       let firstErr: string | null = null;
+      const viaLabel: Record<string, string> = {
+        gemini: "Gemini",
+        "yandex-art": "YandexART",
+        huggingface: "Hugging Face",
+        pollinations: "Pollinations",
+      };
       const noteImage = (r: ImageCallResult) => {
         if (r.dataUrl) return;
-        const prefix = r.via === "huggingface" ? "Hugging Face" : r.via === "pollinations" ? "Pollinations" : "Gemini";
+        const prefix = viaLabel[r.via ?? "gemini"] ?? "Gemini";
         addLog(`${prefix}: ${r.error}`);
         if (!firstErr) {
           firstErr = r.error ?? "неизвестная ошибка";
@@ -139,21 +145,15 @@ export default function App() {
           toast(
             "warn",
             isQuotaError(r.error)
-              ? "У ключа нулевая квота на картинки — нужен платный тариф или ключ Hugging Face"
+              ? "У ключа нулевая квота на картинки — нужен платный тариф или другой провайдер"
               : "API-иллюстрации недоступны — дальше пойдут демо. Причина написана на экране."
           );
         }
       };
       const sourceOf = (r: ImageCallResult): ImageSource =>
-        r.dataUrl ? (r.via === "huggingface" ? "huggingface" : r.via === "pollinations" ? "pollinations" : "gemini") : "demo";
+        r.dataUrl ? ((r.via as ImageSource) ?? "gemini") : "demo";
       const labelOf = (r: ImageCallResult): string =>
-        r.dataUrl
-          ? r.via === "huggingface"
-            ? "Hugging Face"
-            : r.via === "pollinations"
-              ? "Pollinations"
-              : "Gemini"
-          : "демо-SVG";
+        r.dataUrl ? viaLabel[r.via ?? "gemini"] ?? "Gemini" : "демо-SVG";
 
       console.log("[Input JSON → Narrative Module]", inp);
       addLog("Survey: Input JSON собран и отправлен в Narrative Module");
@@ -259,7 +259,7 @@ export default function App() {
       acc.push(backPage);
       setPages([...acc]);
       setLatest(backPage);
-      const apiDrawn = acc.filter((p) => p.imageSource === "gemini" || p.imageSource === "huggingface" || p.imageSource === "pollinations").length;
+      const apiDrawn = acc.filter((p) => p.imageSource && p.imageSource !== "demo").length;
       setSt(
         "spreads",
         apiDrawn === acc.length ? "done" : "warn",
@@ -281,16 +281,19 @@ export default function App() {
       setSt("assemble", "done", `${acc.length} ${plural(acc.length, "страница", "страницы", "страниц")} · квадрат 210×210 мм`);
       addLog("Export: готово. Листайте книгу скроллом, PDF — по кнопке.");
 
-      const geminiDrawn = acc.filter((p) => p.imageSource === "gemini").length;
-      const hfDrawn = acc.filter((p) => p.imageSource === "huggingface").length;
-      const polDrawn = acc.filter((p) => p.imageSource === "pollinations").length;
+      const countSource = (s: string) => acc.filter((p) => p.imageSource === s).length;
+      const geminiDrawn = countSource("gemini");
+      const yandexDrawn = countSource("yandex-art");
+      const hfDrawn = countSource("huggingface");
+      const polDrawn = countSource("pollinations");
       const generated: GeneratedBook = {
         input: inp, story, pages: acc, engine, moderated: report, seed: activeSeed,
         imageReport: {
           gemini: geminiDrawn,
+          yandex: yandexDrawn,
           hf: hfDrawn,
           pollinations: polDrawn,
-          demo: acc.length - geminiDrawn - hfDrawn - polDrawn,
+          demo: acc.length - geminiDrawn - yandexDrawn - hfDrawn - polDrawn,
           firstError: firstErr,
         },
       };

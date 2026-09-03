@@ -9,6 +9,7 @@ const ENGINE_LABEL: Record<EngineKind, string> = {
   demo: "демо-движок",
   gemini: "история: Gemini (запасной)",
   "gemini+claude": "Gemini + Claude",
+  "yandex-gpt": "история: YandexGPT",
 };
 
 const shortError = (e?: string) => (e ? (e.length > 54 ? `${e.slice(0, 54)}…` : e) : "");
@@ -60,6 +61,12 @@ function SourceSticker({ page }: { page: GeneratedPage }) {
     return (
       <span className="absolute left-3 top-3 z-10 -rotate-2 rounded-lg border-2 border-ink bg-moss px-2 py-1 text-[10.5px] font-extrabold uppercase tracking-wide text-paper shadow-block-sm">
         Pollinations · без ключа
+      </span>
+    );
+  if (page.imageSource === "yandex-art")
+    return (
+      <span className="absolute left-3 top-3 z-10 -rotate-2 rounded-lg border-2 border-ink bg-marigold px-2 py-1 text-[10.5px] font-extrabold uppercase tracking-wide text-pine shadow-block-sm">
+        YandexART
       </span>
     );
   if (page.imageSource === "gemini")
@@ -159,6 +166,7 @@ export function BookScreen({
         {rep && (
           <p className="mt-3 text-[12.5px] font-extrabold text-ink/55">
             иллюстрации: <span className="text-sea">Gemini {rep.gemini}</span> ·{" "}
+            <span className={rep.yandex ? "text-marigold" : "text-ink/40"}>YandexART {rep.yandex}</span> ·{" "}
             <span className={rep.hf ? "text-berry" : "text-ink/40"}>Hugging Face {rep.hf}</span> ·{" "}
             <span className={rep.pollinations ? "text-moss" : "text-ink/40"}>Pollinations {rep.pollinations}</span> ·{" "}
             <span className={rep.demo ? "text-coral" : "text-ink/40"}>демо {rep.demo}</span>

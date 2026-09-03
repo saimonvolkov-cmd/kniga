@@ -102,18 +102,30 @@ export async function generateStoryViaApi(
   seed: number,
   provider?: StoryProvider
 ): Promise<StoryResult> {
+  const hasYandex = Boolean(keys?.yandexApiKey?.trim() && keys?.yandexFolderId?.trim());
+  // Приоритет истории: Claude → YandexGPT → Gemini → демо-движок
   const want: StoryProvider | null =
-    provider ?? (keys?.anthropic ? "anthropic" : keys?.gemini ? "gemini" : null);
+    provider ??
+    (keys?.anthropic ? "anthropic" : hasYandex ? "yandex-gpt" : keys?.gemini ? "gemini" : null);
 
   if (want === "anthropic" && keys?.anthropic) {
     try {
       return { story: await storyFromClaude(keys.anthropic, input, seed), engine: "gemini+claude" };
     } catch (e) {
       console.warn("[narrative] Claude недоступен:", e);
+      if (hasYandex) console.info("[narrative] авто-фолбэк: история через YandexGPT");
+      else if (keys?.gemini) console.info("[narrative] авто-фолбэк: история через Gemini");
+    }
+  }
+  if (want === "yandex-gpt" && hasYandex && keys) {
+    try {
+      return { story: await storyFromYandexGpt(keys.yandexApiKey, keys.yandexFolderId, input, seed), engine: "yandex-gpt" };
+    } catch (e) {
+      console.warn("[narrative] YandexGPT недоступен:", e);
       if (keys?.gemini) console.info("[narrative] авто-фолбэк: история через Gemini");
     }
   }
-  if (keys?.gemini && (want === "gemini" || want === "anthropic")) {
+  if (keys?.gemini) {
     try {
       return { story: await storyFromGemini(keys.gemini, input, seed), engine: "gemini" };
     } catch (e) {
@@ -132,7 +144,15 @@ export interface ImageCallResult {
   dataUrl: string | null;
   error: string | null;
   /** какой провайдер отработал (или пытался последним) */
-  via?: "gemini" | "huggingface" | "pollinations";
+  via?: "gemini" | "yandex-art" | "huggingface" | "pollinations";
+}
+
+/** Некоторые провайдеры отдают base64 без префикса `data:` — без него <img> не
+    отрисует картинку, а PDF не встроит её. Приводим к единому формату. */
+function ensureDataPrefix(dataUrl: string): string {
+  if (dataUrl.startsWith("data:")) return dataUrl;
+  if (dataUrl.includes("base64,")) return `data:${dataUrl}`;
+  return dataUrl;
 }
 
 const extractError = (status: number, context: string, body: string): string => {
@@ -396,7 +416,116 @@ export async function generateImageViaPollinations(prompt: string): Promise<Imag
   }
 }
 
-/** Illustration Module: выбор провайдера. Порядок: Gemini → Hugging Face
+/* ── Yandex Cloud AI Studio (YandexGPT + YandexART) ──────────────────────
+   Авторизация: `Authorization: Api-Key <YANDEX_API_KEY>` + `x-folder-id`.
+   YandexGPT — текст (completionAsync + поллинг операции).
+   YandexART — картинки (textToImageAsync + поллинг операции → imageBase64).
+   Оба — асинхронные: запрос → operation id → GET /operations/{id} до done. */
+const YANDEX_BASE = "https://ai.api.cloud.yandex.net";
+const YANDEX_TEXT_MODEL = "yandexgpt";
+const YANDEX_ART_MODEL = "yandex-art";
+const YANDEX_ART_ENDPOINTS = ["textToImageAsync", "imageGenerationAsync"] as const;
+
+function yandexHeaders(key: string, folderId: string): Record<string, string> {
+  return {
+    "content-type": "application/json",
+    authorization: `Api-Key ${key}`,
+    "x-folder-id": folderId,
+  };
+}
+
+/** Поллинг операции Foundation Models до завершения (или ошибки) */
+async function yandexPollOperation(
+  opId: string,
+  key: string,
+  folderId: string,
+  what: string
+): Promise<Record<string, unknown>> {
+  for (let i = 0; i < 45; i++) { // ~90 с максимум
+    await delay(2000);
+    const res = await fetch(`${YANDEX_BASE}/operations/${opId}`, { headers: yandexHeaders(key, folderId) });
+    const body = await res.text();
+    if (!res.ok) throw new Error(extractError(res.status, `Yandex operation ${what}`, body));
+    const op = JSON.parse(body) as {
+      done?: boolean;
+      error?: { message?: string; code?: number };
+      response?: Record<string, unknown>;
+    };
+    if (op.error)
+      throw new Error(`Yandex ${what}: операция завершилась с ошибкой: ${op.error.message ?? body.slice(0, 300)}`);
+    if (op.done && op.response) return op.response;
+  }
+  throw new Error(`Yandex ${what}: операция ${opId} не завершилась за отведённое время`);
+}
+
+/** Narrative Module: YandexGPT (completionAsync + поллинг) → Story JSON */
+async function storyFromYandexGpt(key: string, folderId: string, input: BookInput, seed: number): Promise<StoryJSON> {
+  const res = await fetch(`${YANDEX_BASE}/foundationModels/v1/completionAsync`, {
+    method: "POST",
+    headers: yandexHeaders(key, folderId),
+    body: JSON.stringify({
+      modelUri: `gpt://${folderId}/${YANDEX_TEXT_MODEL}`,
+      completionOptions: { stream: false, temperature: 0.8, maxTokens: "8000" },
+      messages: [
+        { role: "system", text: STORY_SYSTEM },
+        { role: "user", text: buildStoryPrompt(input, seed) },
+      ],
+    }),
+  });
+  const body = await res.text();
+  if (!res.ok) throw new Error(extractError(res.status, "YandexGPT", body));
+  const start = JSON.parse(body) as { id?: string };
+  if (!start.id) throw new Error(`YandexGPT не вернул id операции: ${body.slice(0, 300)}`);
+  const response = (await yandexPollOperation(start.id, key, folderId, "YandexGPT")) as {
+    alternatives?: Array<{ message?: { text?: string } }>;
+  };
+  const raw = response?.alternatives?.[0]?.message?.text ?? "";
+  if (!raw) throw new Error("YandexGPT вернул пустой текст");
+  const story = JSON.parse(raw.replace(/```json|```/g, "").trim()) as StoryJSON;
+  if (!validateStory(story, input.spread_count)) throw new Error("invalid story json from yandex-gpt");
+  return story;
+}
+
+/** Illustration Module: YandexART (textToImageAsync + поллинг → imageBase64) */
+export async function generateImageViaYandexArt(prompt: string, keys: ApiKeys | null): Promise<ImageCallResult> {
+  const key = keys?.yandexApiKey?.trim();
+  const folderId = keys?.yandexFolderId?.trim();
+  if (!key || !folderId)
+    return { dataUrl: null, error: "YandexART: не задан YANDEX_API_KEY или YANDEX_FOLDER_ID", via: "yandex-art" };
+  let lastError = "неизвестная ошибка";
+  for (const endpoint of YANDEX_ART_ENDPOINTS) {
+    try {
+      const res = await fetch(`${YANDEX_BASE}/foundationModels/v1/${endpoint}`, {
+        method: "POST",
+        headers: yandexHeaders(key, folderId),
+        body: JSON.stringify({
+          modelUri: `art://${folderId}/${YANDEX_ART_MODEL}/latest`,
+          prompt,
+          mimeType: "JPEG",
+          ratio: "1:1",
+        }),
+      });
+      const body = await res.text();
+      if (!res.ok) throw new Error(extractError(res.status, `YandexART ${endpoint}`, body));
+      const start = JSON.parse(body) as { id?: string };
+      if (!start.id) throw new Error(`YandexART не вернул id операции: ${body.slice(0, 300)}`);
+      const response = (await yandexPollOperation(start.id, key, folderId, "YandexART")) as {
+        imageBase64?: string;
+        image?: string;
+      };
+      const b64 = response?.imageBase64 ?? response?.image;
+      if (!b64) throw new Error("YandexART вернул операцию без imageBase64");
+      return { dataUrl: ensureDataPrefix(`image/jpeg;base64,${b64}`), error: null, via: "yandex-art" };
+    } catch (e) {
+      lastError = e instanceof Error ? e.message : String(e);
+      if (!/HTTP 404|not found/i.test(lastError)) break; // не тот эндпоинт — пробуем следующий
+    }
+  }
+  console.warn(`[illustration] YandexART: ${lastError}`);
+  return { dataUrl: null, error: lastError, via: "yandex-art" };
+}
+
+/** Illustration Module: выбор провайдера. Порядок: Gemini → YandexART → Hugging Face
     (fal-ai / классический) → Pollinations (без ключа). Все упали → null,
     пайплайн рисует демо-движком. */
 export async function generateIllustration(
@@ -405,8 +534,11 @@ export async function generateIllustration(
   keys: ApiKeys | null
 ): Promise<ImageCallResult> {
   const gemini = await generateImageViaApi(prompt, referencePhotos, keys);
-  if (gemini.dataUrl) return gemini;
+  if (gemini.dataUrl) return { ...gemini, dataUrl: ensureDataPrefix(gemini.dataUrl) };
   const errors: string[] = [`Gemini: ${gemini.error}`];
+  const yart = await generateImageViaYandexArt(prompt, keys);
+  if (yart.dataUrl) return { ...yart, via: "yandex-art" };
+  errors.push(`YandexART: ${yart.error}`);
   if (keys?.huggingface) {
     console.info(`[illustration] Gemini не смог — пробуем Hugging Face`);
     const hf = await generateImageViaHuggingFace(prompt, keys);
@@ -437,6 +569,8 @@ export async function testGeminiImage(prompt: string, apiKey: string): Promise<G
       gemini: apiKey.trim(),
       anthropic: "",
       huggingface: "",
+      yandexApiKey: "",
+      yandexFolderId: "",
     });
     resetQuotaBreaker(); // тест не должен взводить предохранитель пайплайна
     if (!r.dataUrl) return { ok: false, error: r.error ?? "неизвестная ошибка" };
@@ -454,9 +588,11 @@ export async function testHuggingFaceImage(prompt: string, apiKey: string): Prom
       gemini: "",
       anthropic: "",
       huggingface: apiKey.trim(),
+      yandexApiKey: "",
+      yandexFolderId: "",
     });
     if (!r.dataUrl) return { ok: false, error: r.error ?? "неизвестная ошибка" };
-    return { ok: true, dataUrl: r.dataUrl, bytesKb: dataUrlKb(r.dataUrl) };
+    return { ok: true, dataUrl: ensureDataPrefix(r.dataUrl), bytesKb: dataUrlKb(r.dataUrl) };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? `${e.name}: ${e.message}` : String(e) };
   }
@@ -470,6 +606,77 @@ export async function testPollinationsImage(prompt: string): Promise<GeminiTestR
     return { ok: true, dataUrl: r.dataUrl, bytesKb: dataUrlKb(r.dataUrl) };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? `${e.name}: ${e.message}` : String(e) };
+  }
+}
+
+/** Тест YandexGPT: короткий синхронный completion, возвращает текст */
+export async function testYandexGpt(
+  prompt: string,
+  key: string,
+  folderId: string
+): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  if (!key.trim() || !folderId.trim())
+    return { ok: false, error: "Нужны и YANDEX_API_KEY, и YANDEX_FOLDER_ID (шестерёнка в шапке)." };
+  try {
+    const res = await fetch(`${YANDEX_BASE}/foundationModels/v1/completion`, {
+      method: "POST",
+      headers: yandexHeaders(key.trim(), folderId.trim()),
+      body: JSON.stringify({
+        modelUri: `gpt://${folderId.trim()}/yandexgpt-lite`,
+        completionOptions: { stream: false, temperature: 0.8, maxTokens: "300" },
+        messages: [{ role: "user", text: prompt }],
+      }),
+    });
+    const body = await res.text();
+    if (!res.ok) return { ok: false, error: extractError(res.status, "YandexGPT", body) };
+    const j = JSON.parse(body) as { result?: { alternatives?: Array<{ message?: { text?: string } }> } };
+    const text = j?.result?.alternatives?.[0]?.message?.text ?? "";
+    if (!text) return { ok: false, error: `YandexGPT вернул пустой ответ: ${body.slice(0, 200)}` };
+    return { ok: true, text };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? `${e.name}: ${e.message}` : String(e) };
+  }
+}
+
+/** Тест YandexART: реальная генерация картинки (асинхронная операция) */
+export async function testYandexArt(prompt: string, key: string, folderId: string): Promise<GeminiTestResult> {
+  if (!key.trim() || !folderId.trim())
+    return { ok: false, error: "Нужны и YANDEX_API_KEY, и YANDEX_FOLDER_ID (шестерёнка в шапке)." };
+  try {
+    const r = await generateImageViaYandexArt(`${prompt.trim()}${TEST_STYLE_SUFFIX}`, {
+      gemini: "",
+      anthropic: "",
+      huggingface: "",
+      yandexApiKey: key.trim(),
+      yandexFolderId: folderId.trim(),
+    });
+    if (!r.dataUrl) return { ok: false, error: r.error ?? "неизвестная ошибка" };
+    const d = ensureDataPrefix(r.dataUrl);
+    return { ok: true, dataUrl: d, bytesKb: dataUrlKb(d) };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? `${e.name}: ${e.message}` : String(e) };
+  }
+}
+
+/** Проверка Yandex: дешёвый синхронный completion (yandexgpt-lite, 10 токенов) */
+export async function checkYandexKey(key: string, folderId: string): Promise<{ ok: boolean; detail: string }> {
+  if (!key.trim() || !folderId.trim())
+    return { ok: false, detail: "Нужны и YANDEX_API_KEY, и YANDEX_FOLDER_ID" };
+  try {
+    const res = await fetch(`${YANDEX_BASE}/foundationModels/v1/completion`, {
+      method: "POST",
+      headers: yandexHeaders(key.trim(), folderId.trim()),
+      body: JSON.stringify({
+        modelUri: `gpt://${folderId.trim()}/yandexgpt-lite`,
+        completionOptions: { stream: false, temperature: 0.1, maxTokens: "10" },
+        messages: [{ role: "user", text: "Скажи: ок" }],
+      }),
+    });
+    const body = await res.text();
+    if (!res.ok) return { ok: false, detail: extractError(res.status, "YandexGPT-lite", body) };
+    return { ok: true, detail: "ключ и каталог валидны — YandexGPT отвечает" };
+  } catch (e) {
+    return { ok: false, detail: `сеть/CORS: ${e instanceof Error ? e.message : String(e)}` };
   }
 }
 
@@ -512,7 +719,7 @@ export async function checkHuggingFaceKey(key: string): Promise<{ ok: boolean; d
 
 /* ── ключи (только localStorage пользователя, никогда не в коде) ────────── */
 const KEYS_STORAGE = "skazka.apikeys.v1";
-const EMPTY_KEYS: ApiKeys = { gemini: "", anthropic: "", huggingface: "" };
+const EMPTY_KEYS: ApiKeys = { gemini: "", anthropic: "", huggingface: "", yandexApiKey: "", yandexFolderId: "" };
 
 export function loadKeys(): ApiKeys {
   try {

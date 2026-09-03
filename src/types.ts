@@ -43,7 +43,7 @@ export interface StoryJSON {
 /* Внутренние типы пайплайна */
 export type EngineKind = "demo" | "gemini" | "gemini+claude" | "yandex-gpt";
 /** какой провайдер нарисовал страницу */
-export type ImageSource = "gemini" | "huggingface" | "pollinations" | "demo";
+export type ImageSource = "gemini" | "yandex-art" | "huggingface" | "pollinations" | "demo";
 
 export interface GeneratedPage {
   kind: "cover" | "spread" | "back";
@@ -62,7 +62,7 @@ export interface GeneratedBook {
   moderated: { checked: number; blocked: number; softened: number };
   seed: number;
   /** сводка по иллюстрациям: сколько нарисовал каждый провайдер и почему часть ушла в демо */
-  imageReport?: { gemini: number; hf: number; pollinations: number; demo: number; firstError: string | null };
+  imageReport?: { gemini: number; yandex: number; hf: number; pollinations: number; demo: number; firstError: string | null };
 }
 
 export interface ApiKeys {
@@ -76,7 +76,7 @@ export interface ApiKeys {
   yandexFolderId: string;
 }
 
-export type StoryProvider = "anthropic" | "gemini";
+export type StoryProvider = "anthropic" | "yandex-gpt" | "gemini";
 
 export type PipelineStageId = "story" | "safety" | "reference" | "cover" | "spreads" | "layout" | "assemble";
 
