@@ -3,3 +3,9 @@ node_modules/
 dist/
 build/
 *.log
+
+# секреты — никогда в репозиторий
+.env
+.env.local
+.env.*.local
+server/.env

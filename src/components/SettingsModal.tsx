@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ApiKeys } from "../types";
-import { checkGeminiKey, checkHuggingFaceKey, checkYandexKey, hfTokenFormatHint } from "../lib/api";
+import { checkGeminiKey, checkHuggingFaceKey, checkYandexKey, hfTokenFormatHint, isBackendAvailable } from "../lib/api";
 import { ChunkyButton, cx } from "./ui";
 import { IconGear, IconX } from "./icons";
 
@@ -18,6 +18,10 @@ export function SettingsModal({
   const [hf, setHf] = useState(keys.huggingface);
   const [yandexKey, setYandexKey] = useState(keys.yandexApiKey);
   const [yandexFolder, setYandexFolder] = useState(keys.yandexFolderId);
+  const [backendOn, setBackendOn] = useState(false);
+  useEffect(() => {
+    void isBackendAvailable().then(setBackendOn);
+  }, []);
   const [checking, setChecking] = useState<null | "gemini" | "hf" | "yandex">(null);
   const [checkGemini, setCheckGemini] = useState<{ ok: boolean; detail: string } | null>(null);
   const [checkHf, setCheckHf] = useState<{ ok: boolean; detail: string } | null>(null);
@@ -155,9 +159,15 @@ export function SettingsModal({
               {checkYandex.detail}
             </p>
           )}
-          <p className="mt-2 text-[11px] font-bold leading-snug text-ink/50">
-            Нужен сервисный аккаунт с ролями <b>ai.languageModels.user</b> и <b>ai.imageGeneration.user</b> и ключом с областью <b>yc.ai.foundationModels.execute</b>. Ключ показывается один раз при создании.
-          </p>
+          {backendOn ? (
+            <p className="animate-pop mt-2 rounded-lg border-2 border-fern bg-fern/10 px-2.5 py-1.5 text-[11.5px] font-bold leading-snug text-moss">
+              Запущен серверный прокси — Yandex-запросы идут через /api/*, а ключи читаются из серверного .env. Поля ниже в этом режиме не используются.
+            </p>
+          ) : (
+            <p className="mt-2 text-[11px] font-bold leading-snug text-ink/50">
+              Нужен сервисный аккаунт с ролями <b>ai.languageModels.user</b> и <b>ai.imageGeneration.user</b> и ключом с областью <b>yc.ai.foundationModels.execute</b>. Ключ показывается один раз при создании. Лучше запустить сервер (node server/index.js) — тогда ключ вообще не попадёт в браузер.
+            </p>
+          )}
         </div>
 
         <label className="mb-5 block">

@@ -103,7 +103,22 @@ export async function generateStoryViaApi(
   provider?: StoryProvider
 ): Promise<StoryResult> {
   const hasYandex = Boolean(keys?.yandexApiKey?.trim() && keys?.yandexFolderId?.trim());
-  // Приоритет истории: Claude → YandexGPT → Gemini → демо-движок
+  const backendOn = await isBackendAvailable();
+
+  // Приоритет истории: бэкенд (YandexGPT через /api) → Claude → YandexGPT напрямую
+  // (только если сервера нет) → Gemini → демо-движок
+  if (backendOn) {
+    try {
+      console.info("[narrative] история через бэкенд /api/generate-text (YandexGPT, ключ на сервере)");
+      const raw = await backendGenerateText(buildStoryPrompt(input, seed), STORY_SYSTEM);
+      const story = JSON.parse(raw.replace(/```json|```/g, "").trim()) as StoryJSON;
+      if (validateStory(story, input.spread_count)) return { story, engine: "yandex-gpt" };
+      throw new Error("invalid story json from backend");
+    } catch (e) {
+      console.warn("[narrative] бэкенд не справился, пробуем прямую цепочку:", e);
+    }
+  }
+
   const want: StoryProvider | null =
     provider ??
     (keys?.anthropic ? "anthropic" : hasYandex ? "yandex-gpt" : keys?.gemini ? "gemini" : null);
@@ -117,7 +132,9 @@ export async function generateStoryViaApi(
       else if (keys?.gemini) console.info("[narrative] авто-фолбэк: история через Gemini");
     }
   }
-  if (want === "yandex-gpt" && hasYandex && keys) {
+  // Прямой браузерный вызов Yandex — только когда сервера нет (при работающем
+  // бэкенде Yandex уже отработал через /api, второй раз в обход сервера не идём)
+  if (want === "yandex-gpt" && hasYandex && keys && !backendOn) {
     try {
       return { story: await storyFromYandexGpt(keys.yandexApiKey, keys.yandexFolderId, input, seed), engine: "yandex-gpt" };
     } catch (e) {
@@ -416,6 +433,56 @@ export async function generateImageViaPollinations(prompt: string): Promise<Imag
   }
 }
 
+/* ── Локальный бэкенд-прокси (server/index.js → /api/*) ──────────────────
+   Когда приложение открыто через сервер, Yandex-запросы идут через него:
+   ключ живёт в серверном .env и вообще не попадает в браузер. Обнаружение —
+   GET /api/health; при статической раздаче (без сервера) проба падает, и
+   пайплайн честно катится по прямой браузерной цепочке провайдеров. */
+let backendState: boolean | null = null;
+
+export async function isBackendAvailable(force = false): Promise<boolean> {
+  if (backendState !== null && !force) return backendState;
+  try {
+    const res = await fetch("/api/health", {
+      headers: { accept: "application/json" },
+      signal: AbortSignal.timeout(1500),
+    });
+    const ct = res.headers.get("content-type") ?? "";
+    backendState = res.ok && ct.includes("application/json") && ((await res.json()) as { ok?: boolean }).ok === true;
+  } catch {
+    backendState = false;
+  }
+  return backendState;
+}
+
+async function backendPost(url: string, payload: unknown, timeoutMs: number): Promise<string> {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  const body = await res.text();
+  if (!res.ok) throw new Error(extractError(res.status, `бэкенд ${url}`, body));
+  return body;
+}
+
+/** Narrative через бэкенд: POST /api/generate-text → raw-текст (Story JSON парсит фронтенд) */
+export async function backendGenerateText(prompt: string, system: string, maxTokens = 12000): Promise<string> {
+  const body = await backendPost("/api/generate-text", { prompt, system, temperature: 0.85, maxTokens }, 120_000);
+  const text = (JSON.parse(body) as { text?: string }).text;
+  if (!text) throw new Error("бэкенд /api/generate-text вернул пустой текст");
+  return text;
+}
+
+/** Illustration через бэкенд: POST /api/generate-image → dataURL картинки */
+export async function backendGenerateImage(prompt: string, seed?: number): Promise<string> {
+  const body = await backendPost("/api/generate-image", { prompt, seed }, 240_000);
+  const dataUrl = (JSON.parse(body) as { dataUrl?: string }).dataUrl;
+  if (!dataUrl) throw new Error("бэкенд /api/generate-image вернул ответ без dataUrl");
+  return ensureDataPrefix(dataUrl);
+}
+
 /* ── Yandex Cloud AI Studio (YandexGPT + YandexART) ──────────────────────
    Авторизация: `Authorization: Api-Key <YANDEX_API_KEY>` + `x-folder-id`.
    YandexGPT — текст (completionAsync + поллинг операции).
@@ -525,20 +592,36 @@ export async function generateImageViaYandexArt(prompt: string, keys: ApiKeys | 
   return { dataUrl: null, error: lastError, via: "yandex-art" };
 }
 
-/** Illustration Module: выбор провайдера. Порядок: Gemini → YandexART → Hugging Face
-    (fal-ai / классический) → Pollinations (без ключа). Все упали → null,
-    пайплайн рисует демо-движком. */
+/** Illustration Module: выбор провайдера. Порядок: бэкенд /api/generate-image
+    (YandexART, ключ на сервере) → Gemini → YandexART напрямую (только без сервера)
+    → Hugging Face (fal-ai / классический) → Pollinations (без ключа).
+    Все упали → null, пайплайн рисует демо-движком. */
 export async function generateIllustration(
   prompt: string,
   referencePhotos: string[],
   keys: ApiKeys | null
 ): Promise<ImageCallResult> {
+  const errors: string[] = [];
+  const backendOn = await isBackendAvailable();
+
+  if (backendOn) {
+    try {
+      console.info("[illustration] картинка через бэкенд /api/generate-image (YandexART, ключ на сервере)");
+      return { dataUrl: await backendGenerateImage(prompt), error: null, via: "yandex-art" };
+    } catch (e) {
+      errors.push(`Бэкенд /api/generate-image: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+
   const gemini = await generateImageViaApi(prompt, referencePhotos, keys);
   if (gemini.dataUrl) return { ...gemini, dataUrl: ensureDataPrefix(gemini.dataUrl) };
-  const errors: string[] = [`Gemini: ${gemini.error}`];
-  const yart = await generateImageViaYandexArt(prompt, keys);
-  if (yart.dataUrl) return { ...yart, via: "yandex-art" };
-  errors.push(`YandexART: ${yart.error}`);
+  errors.push(`Gemini: ${gemini.error}`);
+  // прямой браузерный YandexART — только когда сервера нет (иначе он уже отработал через /api)
+  if (!backendOn) {
+    const yart = await generateImageViaYandexArt(prompt, keys);
+    if (yart.dataUrl) return { ...yart, via: "yandex-art" };
+    errors.push(`YandexART: ${yart.error}`);
+  }
   if (keys?.huggingface) {
     console.info(`[illustration] Gemini не смог — пробуем Hugging Face`);
     const hf = await generateImageViaHuggingFace(prompt, keys);

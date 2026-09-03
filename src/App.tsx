@@ -5,7 +5,7 @@ import type {
 import { getPalette } from "./data/content";
 import {
   generateStoryViaApi, loadKeys, saveKeys, generateIllustration, resetQuotaBreaker,
-  isQuotaError, type ImageCallResult,
+  isBackendAvailable, isQuotaError, type ImageCallResult,
 } from "./lib/api";
 import { moderateStory } from "./lib/safety";
 import { KIND_NOUN } from "./lib/storyEngine";
@@ -68,6 +68,11 @@ export default function App() {
   const [generating, setGenerating] = useState(false);
   /** первая ошибка API-иллюстраций за прогон — видна на экране прогресса и в книге */
   const [geminiError, setGeminiError] = useState<string | null>(null);
+  /** запущен ли серверный прокси (node server/index.js) — тогда Yandex ходит через /api */
+  const [backendOn, setBackendOn] = useState(false);
+  useEffect(() => {
+    void isBackendAvailable().then(setBackendOn);
+  }, []);
 
   const runToken = useRef(0);
   const toastId = useRef(0);
@@ -396,6 +401,15 @@ export default function App() {
             {phase === "survey" && (
               <span className="hidden rounded-lg border-2 border-ink/20 px-2.5 py-1 font-display text-[12px] font-bold text-ink/55 sm:block">
                 глава {step + 1} / {CHAPTERS.length}
+              </span>
+            )}
+            {backendOn && (
+              <span
+                title="Запущен серверный прокси (server/index.js): YandexGPT и YandexART вызываются через /api/*, ключ хранится в серверном .env и не попадает в браузер"
+                className="animate-pop hidden items-center gap-1.5 rounded-xl border-[2.5px] border-ink bg-pine px-3 py-1.5 font-display text-[12.5px] font-bold text-marigold shadow-block-sm md:flex"
+              >
+                <IconCheck className="h-4 w-4" strokeWidth={3} />
+                бэкенд /api активен
               </span>
             )}
             <button
