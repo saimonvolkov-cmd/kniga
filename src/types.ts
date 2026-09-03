@@ -41,7 +41,7 @@ export interface StoryJSON {
 }
 
 /* Внутренние типы пайплайна */
-export type EngineKind = "demo" | "gemini" | "gemini+claude";
+export type EngineKind = "demo" | "gemini" | "gemini+claude" | "yandex-gpt";
 /** какой провайдер нарисовал страницу */
 export type ImageSource = "gemini" | "huggingface" | "pollinations" | "demo";
 
@@ -70,6 +70,10 @@ export interface ApiKeys {
   anthropic: string;
   /** Hugging Face — запасной провайдер иллюстраций (Inference Providers / fal-ai) */
   huggingface: string;
+  /** Yandex Cloud: сервисный API-ключ (Authorization: Api-key <ключ>) */
+  yandexApiKey: string;
+  /** Yandex Cloud: идентификатор каталога — обязателен для каждого запроса Foundation Models */
+  yandexFolderId: string;
 }
 
 export type StoryProvider = "anthropic" | "gemini";
