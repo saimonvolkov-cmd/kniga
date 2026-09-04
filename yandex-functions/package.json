@@ -1,0 +1,9 @@
+{
+  "name": "kniga-yandex-functions",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Yandex Cloud Functions: YandexGPT (текст) + YandexART (изображения) + health-чек. Ключи — из process.env, в архив не попадают.",
+  "dependencies": {
+    "node-fetch": "^2.7.0"
+  }
+}

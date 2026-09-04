@@ -28,7 +28,22 @@ Yandex API не отдаёт CORS, поэтому ключ живёт тольк
 по ключам из настроек, Pollinations — бесплатно без ключа) или на локальном
 демо-движке.
 
-## Прод
+## Прод — Yandex Cloud Functions (без Docker)
+
+Основной путь деплоя: три функции в `yandex-functions/` (`generate-text`,
+`generate-image`, `health`) загружаются ZIP-архивом через веб-консоль — Docker не
+нужен. Пошаговая инструкция: [`yandex-functions/README.md`](yandex-functions/README.md).
+
+После деплоя фронтенд собирается с тремя URL функций (одна точка конфигурации):
+
+```bash
+VITE_YANDEX_HEALTH_FN_URL=https://<health>.functions.yandexcloud.net \
+VITE_YANDEX_TEXT_FN_URL=https://<text>.functions.yandexcloud.net \
+VITE_YANDEX_IMAGE_FN_URL=https://<image>.functions.yandexcloud.net \
+npm run build
+```
+
+## Прод — альтернатива: Docker / локальный прокси
 
 ```bash
 npm run build               # фронтенд в dist/
@@ -37,7 +52,8 @@ docker run --rm -p 3001:3001 -e YANDEX_API_KEY=... -e YANDEX_FOLDER_ID=... kniga
 ```
 
 Адрес прокси для фронтенда — одна переменная `VITE_YANDEX_PROXY_URL`
-(по умолчанию опрашивается `http://localhost:3001`).
+(по умолчанию опрашивается `http://localhost:3001`). Cloud Functions имеют
+приоритет; если они не заданы/не отвечают, фронтенд откатывается на прокси.
 
 ## Структура
 
@@ -45,5 +61,6 @@ docker run --rm -p 3001:3001 -e YANDEX_API_KEY=... -e YANDEX_FOLDER_ID=... kniga
 - `src/lib/illustrator.ts` — Illustration Module (демо-SVG сцены, промпты)
 - `src/lib/safety.ts` — Content Safety (ALLOW/BLOCK + смягчение)
 - `src/lib/pdf.ts` — Export Module (pdf-lib, кириллица через canvas)
-- `src/lib/api.ts` — провайдеры: Yandex-прокси / Claude / Gemini / HF / Pollinations
+- `src/lib/api.ts` — провайдеры: Yandex (Cloud Functions / прокси) / Claude / Gemini / HF / Pollinations
+- `yandex-functions/` — Yandex Cloud Functions: YandexGPT + YandexART + health (ключи из env)
 - `server/server.js` — Express-прокси Yandex AI Studio (PORT из env, без ключей в коде)
