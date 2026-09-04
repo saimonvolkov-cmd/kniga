@@ -60,7 +60,8 @@ export type EngineKind = "demo" | "gemini" | "gemini+claude" | "yandex-gpt";
 export type StoryProvider = "anthropic" | "yandex-gpt" | "gemini";
 /** какой провайдер нарисовал страницу */
 export type ImageSource = "gemini" | "yandex-art" | "huggingface" | "pollinations" | "demo";
-export type ConnMode = "backend" | "off";
+/** cloud = Yandex Cloud Functions · backend = локальный Express-прокси · off = ничего */
+export type ConnMode = "cloud" | "backend" | "off";
 
 export interface GeneratedPage {
   kind: "cover" | "spread" | "back";

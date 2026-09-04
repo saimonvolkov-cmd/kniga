@@ -394,9 +394,15 @@ export default function App() {
   const connMeta: Record<ConnMode | "checking", { label: string; title: string; pill: string; dot: string }> = {
     checking: {
       label: "проверяю Yandex…",
-      title: "Ищу локальный прокси (GET /api/yandex/status)",
+      title: "Ищу Yandex Cloud Functions (health-чек) или локальный прокси (GET /api/yandex/status)",
       pill: "bg-foam text-ink/50",
       dot: "bg-ink/30",
+    },
+    cloud: {
+      label: "Yandex · Cloud Functions",
+      title: "YandexGPT и YandexART идут через Yandex Cloud Functions — ключи в переменных окружения функций, в браузер не попадают",
+      pill: "bg-sea text-paper",
+      dot: "bg-marigold",
     },
     backend: {
       label: "Yandex настроен на сервере",
@@ -465,9 +471,9 @@ export default function App() {
                 connMode === "off" && "cursor-pointer"
               )}
             >
-              <i className={cx("h-2.5 w-2.5 rounded-full", connMeta[connMode].dot, connMode === "backend" && "animate-pulse-dot")} />
+              <i className={cx("h-2.5 w-2.5 rounded-full", connMeta[connMode].dot, (connMode === "backend" || connMode === "cloud") && "animate-pulse-dot")} />
               <span className="hidden sm:inline">{connMeta[connMode].label}</span>
-              <span className="sm:hidden">{connMode === "backend" ? "Yandex ✓" : connMode === "off" ? "демо" : "…"}</span>
+              <span className="sm:hidden">{connMode === "backend" || connMode === "cloud" ? "Yandex ✓" : connMode === "off" ? "демо" : "…"}</span>
             </button>
             <button
               onClick={() => setSettingsOpen(true)}

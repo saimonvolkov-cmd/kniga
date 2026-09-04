@@ -22,7 +22,7 @@ export function SettingsModal({
   const [yandexOn, setYandexOn] = useState(false);
 
   useEffect(() => {
-    if (open) void detectConnection(true).then((m) => setYandexOn(m === "backend"));
+    if (open) void detectConnection(true).then((m) => setYandexOn(m === "backend" || m === "cloud"));
   }, [open]);
 
   const hfFormatHint = hfTokenFormatHint(hf);
@@ -68,9 +68,10 @@ export function SettingsModal({
             </span>
           </div>
           <p className="mt-2 text-[11.5px] font-bold leading-snug text-ink/60">
-            Ключи Yandex в браузере не вводятся: Yandex API не отдаёт CORS, поэтому запросы идут через локальный прокси,
-            а ключи читаются из серверного <code className="rounded bg-pine px-1 py-0.5 font-mono text-[10.5px] text-foam">.env</code>.
-            Запуск: <code className="rounded bg-pine px-1 py-0.5 font-mono text-[10.5px] text-foam">npm --prefix server run server</code>
+            Ключи Yandex в браузере не вводятся: Yandex API не отдаёт CORS, поэтому запросы идут через сервер —
+            <b> Yandex Cloud Functions</b> (URL задаются переменными <code className="rounded bg-pine px-1 py-0.5 font-mono text-[10.5px] text-foam">VITE_YANDEX_*_FN_URL</code>,
+            ключи — в переменных окружения функций, см. <code className="rounded bg-pine px-1 py-0.5 font-mono text-[10.5px] text-foam">yandex-functions/</code>)
+            или <b>локальный прокси</b> (<code className="rounded bg-pine px-1 py-0.5 font-mono text-[10.5px] text-foam">npm --prefix server run server</code>, ключи из серверного .env).
           </p>
         </div>
 

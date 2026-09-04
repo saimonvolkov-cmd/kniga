@@ -138,19 +138,42 @@ export async function generateStoryViaApi(
   return { story: demoGenerateStory(input, seed), engine: "demo" };
 }
 
-/* ── Локальный Yandex-прокси (/api/yandex/*) ───────────────────────────────
-   Адрес прокси вынесен в ОДНУ точку конфигурации: переменная окружения
-   VITE_YANDEX_PROXY_URL (задаётся при сборке/запуске, например
-   VITE_YANDEX_PROXY_URL=https://kniga-proxy.example.com npm run build).
-   Без неё опрашиваются локальные адреса по умолчанию. */
-const envUrl = ((import.meta as unknown as { env?: Record<string, string | undefined> }).env?.VITE_YANDEX_PROXY_URL ?? "").trim();
-const BACKEND_BASES: string[] = Array.from(
-  new Set([envUrl, "", "http://localhost:3001", "http://127.0.0.1:3001"].filter(Boolean))
+/* ── Yandex-бэкенд: Cloud Functions (приоритет) или локальный прокси ──────
+   Все адреса — в ОДНОЙ точке конфигурации (переменные сборки VITE_*, ничего не
+   захардкожено под конкретный деплой):
+     • Yandex Cloud Functions (yandex-functions/):
+         VITE_YANDEX_TEXT_FN_URL / VITE_YANDEX_IMAGE_FN_URL / VITE_YANDEX_HEALTH_FN_URL
+     • Локальный Express-прокси (server/):
+         VITE_YANDEX_PROXY_URL, по умолчанию http://localhost:3001
+   Cloud Functions проверяются первыми (health-чек); если не заданы или не
+   отвечают — пробуем локальный прокси. Ключи в обоих случаях остаются на
+   сервере, из браузера в Yandex нет ни одного прямого запроса. */
+
+const viteEnv = ((import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {});
+
+const FN_TEXT_URL = (viteEnv.VITE_YANDEX_TEXT_FN_URL ?? "").trim();
+const FN_IMAGE_URL = (viteEnv.VITE_YANDEX_IMAGE_FN_URL ?? "").trim();
+const FN_HEALTH_URL = (viteEnv.VITE_YANDEX_HEALTH_FN_URL ?? "").trim();
+const fnConfigured = Boolean(FN_TEXT_URL && FN_IMAGE_URL && FN_HEALTH_URL);
+
+const PROXY_BASES: string[] = Array.from(
+  new Set([(viteEnv.VITE_YANDEX_PROXY_URL ?? "").trim(), "http://localhost:3001", "http://127.0.0.1:3001"].filter(Boolean))
 );
 
-let backendBasePromise: Promise<string | null> | null = null;
+export type BackendMode = "cloud-functions" | "local-proxy" | "none";
 
-async function probeYandexStatus(base: string): Promise<boolean> {
+let backendModePromise: Promise<BackendMode> | null = null;
+
+async function probeCloudHealth(): Promise<boolean> {
+  try {
+    const res = await fetch(FN_HEALTH_URL, { method: "GET", signal: AbortSignal.timeout(5000) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function probeLocalProxy(base: string): Promise<boolean> {
   try {
     const res = await fetch(`${base}/api/yandex/status`, {
       headers: { accept: "application/json" },
@@ -164,51 +187,77 @@ async function probeYandexStatus(base: string): Promise<boolean> {
   }
 }
 
-/** Адрес работающего прокси (или null). Кэш на время жизни страницы. */
-export function getBackendBase(force = false): Promise<string | null> {
-  if (backendBasePromise && !force) return backendBasePromise;
-  backendBasePromise = (async () => {
-    for (const base of BACKEND_BASES) if (await probeYandexStatus(base)) return base;
-    return null;
+/** Какой Yandex-бэкенд доступен. Кэш на время жизни страницы. */
+export function getBackendMode(force = false): Promise<BackendMode> {
+  if (backendModePromise && !force) return backendModePromise;
+  backendModePromise = (async () => {
+    if (fnConfigured && (await probeCloudHealth())) return "cloud-functions";
+    for (const base of PROXY_BASES) if (await probeLocalProxy(base)) return "local-proxy";
+    return "none";
   })();
-  return backendBasePromise;
+  return backendModePromise;
 }
 
 export async function isBackendAvailable(force = false): Promise<boolean> {
-  return (await getBackendBase(force)) !== null;
+  return (await getBackendMode(force)) !== "none";
 }
 
-/** Лёгкий статус для индикатора: настроен ли Yandex на сервере */
-export async function detectConnection(force = false): Promise<"backend" | "off"> {
-  return (await isBackendAvailable(force)) ? "backend" : "off";
+/** Статус для индикатора: cloud = Cloud Functions · backend = локальный прокси · off */
+export async function detectConnection(force = false): Promise<"cloud" | "backend" | "off"> {
+  const mode = await getBackendMode(force);
+  return mode === "cloud-functions" ? "cloud" : mode === "local-proxy" ? "backend" : "off";
 }
 
-async function backendPost(path: string, payload: unknown, timeoutMs: number): Promise<string> {
-  const base = await getBackendBase();
-  if (base === null)
-    throw new Error("Yandex не настроен: запустите прокси (npm --prefix server run server) и проверьте .env");
-  const res = await fetch(`${base}${path}`, {
+async function findProxyBase(): Promise<string> {
+  for (const base of PROXY_BASES) if (await probeLocalProxy(base)) return base;
+  throw new Error("локальный прокси недоступен (npm --prefix server run server)");
+}
+
+async function postJson(url: string, payload: unknown, timeoutMs: number, what: string): Promise<string> {
+  const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(payload),
     signal: AbortSignal.timeout(timeoutMs),
   });
   const body = await res.text();
-  if (!res.ok) throw new Error(extractError(res.status, `прокси ${path}`, body));
+  if (!res.ok) throw new Error(extractError(res.status, what, body));
   return body;
 }
 
-/** Текст через прокси: POST /api/yandex/generate-text → raw-текст (Story JSON парсит фронтенд) */
+/** Текст: Cloud Functions ({result}) или локальный прокси ({text}) → raw-текст */
 export async function backendGenerateText(prompt: string, system: string, maxTokens = 8000): Promise<string> {
-  const body = await backendPost("/api/yandex/generate-text", { prompt, system, temperature: 0.85, maxTokens }, 180_000);
+  const mode = await getBackendMode();
+  if (mode === "none")
+    throw new Error("Yandex не настроен: задайте VITE_YANDEX_*_FN_URL (Cloud Functions) или запустите прокси");
+  const payload = { prompt, system, temperature: 0.85, maxTokens };
+  if (mode === "cloud-functions") {
+    const body = await postJson(FN_TEXT_URL, payload, 180_000, "Cloud Function generate-text");
+    const j = JSON.parse(body) as { result?: string; text?: string };
+    const text = j.result ?? j.text;
+    if (!text) throw new Error("Cloud Function generate-text вернула пустой текст");
+    return text;
+  }
+  const base = await findProxyBase();
+  const body = await postJson(`${base}/api/yandex/generate-text`, payload, 180_000, "прокси /api/yandex/generate-text");
   const text = (JSON.parse(body) as { text?: string }).text;
   if (!text) throw new Error("прокси /api/yandex/generate-text вернул пустой текст");
   return text;
 }
 
-/** Картинка через прокси: POST /api/yandex/generate-image → dataURL */
+/** Картинка: Cloud Functions или локальный прокси → dataURL */
 export async function backendGenerateImage(prompt: string, seed?: number): Promise<string> {
-  const body = await backendPost("/api/yandex/generate-image", { prompt, seed }, 240_000);
+  const mode = await getBackendMode();
+  if (mode === "none")
+    throw new Error("Yandex не настроен: задайте VITE_YANDEX_*_FN_URL (Cloud Functions) или запустите прокси");
+  if (mode === "cloud-functions") {
+    const body = await postJson(FN_IMAGE_URL, { prompt, seed }, 240_000, "Cloud Function generate-image");
+    const dataUrl = (JSON.parse(body) as { dataUrl?: string }).dataUrl;
+    if (!dataUrl) throw new Error("Cloud Function generate-image вернула ответ без dataUrl");
+    return ensureDataPrefix(dataUrl);
+  }
+  const base = await findProxyBase();
+  const body = await postJson(`${base}/api/yandex/generate-image`, { prompt, seed }, 240_000, "прокси /api/yandex/generate-image");
   const dataUrl = (JSON.parse(body) as { dataUrl?: string }).dataUrl;
   if (!dataUrl) throw new Error("прокси /api/yandex/generate-image вернул ответ без dataUrl");
   return ensureDataPrefix(dataUrl);
