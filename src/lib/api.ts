@@ -151,9 +151,18 @@ export async function generateStoryViaApi(
 
 const viteEnv = ((import.meta as unknown as { env?: Record<string, string | undefined> }).env ?? {});
 
-const FN_TEXT_URL = (viteEnv.VITE_YANDEX_TEXT_FN_URL ?? "").trim();
-const FN_IMAGE_URL = (viteEnv.VITE_YANDEX_IMAGE_FN_URL ?? "").trim();
-const FN_HEALTH_URL = (viteEnv.VITE_YANDEX_HEALTH_FN_URL ?? "").trim();
+/* Продакшен-адреса задеплоенных Yandex Cloud Functions. Это ЕДИНСТВЕННАЯ точка,
+   где они прописаны: переменные сборки VITE_YANDEX_*_FN_URL имеют приоритет и
+   позволяют заменить адреса без правки кода (например, для стейджинга). */
+const DEFAULT_FN_URLS = {
+  text: "https://functions.yandexcloud.net/d4espk5f9san6nbhboij",
+  image: "https://functions.yandexcloud.net/d4eksf6i4b1906srn22e",
+  health: "https://functions.yandexcloud.net/d4ea980tmec1e5pdai3n",
+} as const;
+
+const FN_TEXT_URL = (viteEnv.VITE_YANDEX_TEXT_FN_URL ?? "").trim() || DEFAULT_FN_URLS.text;
+const FN_IMAGE_URL = (viteEnv.VITE_YANDEX_IMAGE_FN_URL ?? "").trim() || DEFAULT_FN_URLS.image;
+const FN_HEALTH_URL = (viteEnv.VITE_YANDEX_HEALTH_FN_URL ?? "").trim() || DEFAULT_FN_URLS.health;
 const fnConfigured = Boolean(FN_TEXT_URL && FN_IMAGE_URL && FN_HEALTH_URL);
 
 const PROXY_BASES: string[] = Array.from(
@@ -252,8 +261,9 @@ export async function backendGenerateImage(prompt: string, seed?: number): Promi
     throw new Error("Yandex не настроен: задайте VITE_YANDEX_*_FN_URL (Cloud Functions) или запустите прокси");
   if (mode === "cloud-functions") {
     const body = await postJson(FN_IMAGE_URL, { prompt, seed }, 240_000, "Cloud Function generate-image");
-    const dataUrl = (JSON.parse(body) as { dataUrl?: string }).dataUrl;
-    if (!dataUrl) throw new Error("Cloud Function generate-image вернула ответ без dataUrl");
+    const j = JSON.parse(body) as { dataUrl?: string; image?: string; url?: string };
+    const dataUrl = j.dataUrl ?? j.image ?? j.url;
+    if (!dataUrl) throw new Error(`Cloud Function generate-image вернула ответ без dataUrl: ${body.slice(0, 200)}`);
     return ensureDataPrefix(dataUrl);
   }
   const base = await findProxyBase();
